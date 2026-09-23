@@ -713,6 +713,8 @@ pub struct AppState {
     pub context_usage: Option<zeron_proto::ContextUsage>,
     pub active_goal: Option<(zeron_proto::HarnessId, serde_json::Value)>,
     pub prime_background: bool,
+    pub(crate) prime_retrying: bool,
+    pub(crate) prime_compacting: bool,
     run_events_task: Option<Task<()>>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
@@ -811,6 +813,8 @@ impl AppState {
             selected_chat: None,
             active_goal: None,
             prime_background: false,
+            prime_retrying: false,
+            prime_compacting: false,
             run_events_task: None,
             transcript: Vec::new(),
             queue: Vec::new(),
@@ -970,6 +974,8 @@ impl AppState {
             self.run_events_task = None;
             self.active_goal = None;
             self.prime_background = false;
+            self.prime_retrying = false;
+            self.prime_compacting = false;
             self.transcript.clear();
             self.context_usage = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
@@ -1792,6 +1798,8 @@ impl AppState {
         self.run_events_task = None;
         self.active_goal = None;
         self.prime_background = false;
+        self.prime_retrying = false;
+        self.prime_compacting = false;
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
@@ -1949,6 +1957,8 @@ impl AppState {
         if let Some(chat_id) = self.selected_chat.clone() {
             self.active_goal = None;
             self.prime_background = false;
+            self.prime_retrying = false;
+            self.prime_compacting = false;
             self.run_events_task =
                 Some(spawn_run_events_watch(cx, handle.clone(), chat_id.clone()));
             self.transcript_task =
@@ -2120,6 +2130,8 @@ impl AppState {
         self.run_events_task = None;
         self.active_goal = None;
         self.prime_background = false;
+        self.prime_retrying = false;
+        self.prime_compacting = false;
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
@@ -2804,6 +2816,8 @@ fn spawn_run_events_watch(
                                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
                                         state.active_goal = None;
                                         state.prime_background = false;
+                                        state.prime_retrying = false;
+                                        state.prime_compacting = false;
                                         cx.notify();
                                     }
                                 })
@@ -2827,6 +2841,47 @@ fn spawn_run_events_watch(
                                         if state.selected_chat.as_deref() == Some(chat_id.as_str())
                                         {
                                             state.prime_background = background;
+                                            if native["type"] == "session_closed" {
+                                                state.prime_retrying = false;
+                                                state.prime_compacting = false;
+                                            }
+                                            cx.notify();
+                                        }
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            }
+                            if matches!(
+                                native["type"].as_str(),
+                                Some(
+                                    "auto_retry_start"
+                                        | "auto_retry_end"
+                                        | "compaction_start"
+                                        | "compaction_end"
+                                )
+                            ) {
+                                if this
+                                    .update(cx, |state, cx| {
+                                        if state.selected_chat.as_deref() == Some(chat_id.as_str())
+                                        {
+                                            match native["type"].as_str() {
+                                                Some("auto_retry_start") => {
+                                                    state.prime_retrying = true
+                                                }
+                                                Some("auto_retry_end") => {
+                                                    state.prime_retrying = false
+                                                }
+                                                Some("compaction_start") => {
+                                                    state.prime_compacting = true
+                                                }
+                                                Some("compaction_end") => {
+                                                    state.prime_compacting = false
+                                                }
+                                                _ => unreachable!(),
+                                            }
                                             cx.notify();
                                         }
                                     })
@@ -2837,11 +2892,15 @@ fn spawn_run_events_watch(
                                 continue;
                             }
                         }
-                        if event["type"] == "done" && event["status"] != "completed" {
+                        if event["type"] == "done" {
                             if this
                                 .update(cx, |state, cx| {
                                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
-                                        state.prime_background = false;
+                                        if event["status"] != "completed" {
+                                            state.prime_background = false;
+                                        }
+                                        state.prime_retrying = false;
+                                        state.prime_compacting = false;
                                         cx.notify();
                                     }
                                 })

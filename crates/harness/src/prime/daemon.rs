@@ -396,6 +396,9 @@ mod tests {
                         json!({"isSessionActive":weak_waits == 1,"hasRunningRlmChildren":weak_waits == 1,"unfinishedActionCount":0})
                     }
                     "get_commands" => json!({"commands":[]}),
+                    "get_session_stats" => {
+                        json!({"contextUsage":{"tokens":100,"contextWindow":200000}})
+                    }
                     "prompt" => {
                         events.extend([
                             json!({"type":"agent_start"}),

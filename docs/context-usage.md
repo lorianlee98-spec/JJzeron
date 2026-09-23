@@ -1,11 +1,11 @@
 # Context usage
 
-Every selected conversation has a context ring beneath its composer, including
-project-less and remote conversations. Hovering shows measured tokens and
-remaining capacity. The ring turns amber at 75% and red at 90%; its drawing clamps
-at a full circle while the label preserves over-capacity measurements. A dash
-means the harness has not reported enough data to calculate a percentage. Measured
-zero is displayed as 0%.
+When the harness reports a context capacity, the selected conversation shows a
+context ring beneath its composer, including project-less and remote conversations.
+Hovering shows measured tokens and remaining capacity. The ring turns amber at 75%
+and red at 90%; its drawing clamps at a full circle while the label preserves
+over-capacity measurements. A dash means the harness has not reported enough data
+to calculate a percentage. Measured zero is displayed as 0%.
 
 The host normalizes context occupancy separately from billing `Usage` events:
 
@@ -14,13 +14,15 @@ The host normalizes context occupancy separately from billing `Usage` events:
 | Claude Code | Latest parent assistant message's input plus cache-read/cache-creation tokens; capacity from that model's result metadata. Aggregate result billing and child agents are excluded. |
 | Codex | Latest model call (`tokenUsage.last`), with `modelContextWindow`; never the cumulative thread total. |
 | OpenCode | Latest parent assistant message's total, or input/output/cache counts; capacity from the advertised provider/model catalog. Empty in-progress placeholders do not clear a measurement. |
+| Prime Agent | Native `get_session_stats.contextUsage` snapshot on session attach, assistant completion, and compaction. Null tokens after compaction clear the old reading; cumulative billing tokens are not used. |
 | ACP (Devin, Grok, Hermes, pi) | `usage_update.used` and advertised capacity when the agent reports them. |
 | Cursor | The pinned SDK exposes billed per-turn counts, not context occupancy. The shared control shows unavailable. |
 | Mock / older hosts | Unavailable until a context snapshot is supplied. |
 
 `AgentEvent::ContextUsage` updates one atomic `meta.contextUsage` value in the
 session document. Partial measurements preserve known fields; a zero capacity is
-ignored. New non-resumed runs clear old usage. Post-turn updates can refresh the
+ignored. Prime's `ContextUsageSnapshot` replaces the complete reading so null
+post-compaction tokens clear the previous occupancy. New non-resumed runs clear old usage. Post-turn updates can refresh the
 snapshot without reopening a completed turn, and subagent events cannot change
 the parent meter.
 

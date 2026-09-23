@@ -21,6 +21,7 @@ if "--resume" in sys.argv:
 
 pending_prompt_id = None
 steer_scenario = False
+stats_phase = "initial"
 for line in sys.stdin:
     request = json.loads(line)
     kind = request["type"]
@@ -76,6 +77,7 @@ for line in sys.stdin:
         send({"type": "session_action_update", "actions": {"queuedCount": 1}})
         send({"type": "compaction_start", "reason": "threshold"})
         send({"type": "compaction_end", "reason": "threshold", "result": {"summary": "saved"}})
+        stats_phase = "compacted"
         send({"type": "auto_retry_start", "attempt": 1, "maxAttempts": 3})
         send({"type": "auto_retry_end", "attempt": 1, "success": True})
         send({"type": "extension_ui_request", "id": "status-1", "method": "setStatus", "statusKey": "work", "statusText": "Running"})
@@ -97,6 +99,10 @@ for line in sys.stdin:
              "thinkingLevelMap": {"minimal": None, "max": None}},
             {"provider": "other", "id": "second", "name": "Second", "reasoning": False},
         ]}
+    elif kind == "get_session_stats":
+        data = {"contextUsage": {"tokens": (42000 if stats_phase == "answered" else
+                                            12000 if "--resume" in sys.argv and stats_phase == "initial" else None),
+                                 "contextWindow": 200000}}
     elif kind == "get_commands":
         data = {"commands": [
             {"name": "skill:research", "source": "skill", "description": "Research",
@@ -126,5 +132,7 @@ for line in sys.stdin:
                         "result": {"content": [{"type": "text", "text": "1"}]}}})
         send({"type": "rlm_child_update", "child": {"id": "child-1", "label": "child task", "status": "done", "activeSessionId": "active-child-1"}})
         send({"type": "observed_session_event", "activeSessionId": "active-child-1", "event": {"type": "agent_end"}})
+        stats_phase = "answered"
+        send({"type": "message_end", "message": {"role": "assistant", "usage": {"input": 1000, "output": 50, "totalTokens": 1050}}})
         send({"type": "turn_end", "message": {"role": "assistant"}, "toolResults": []})
         send({"type": "agent_end"})

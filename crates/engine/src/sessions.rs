@@ -2359,11 +2359,20 @@ async fn drive_run(
             }
         }
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
-        if let AgentEvent::ContextUsage { tokens, window } = &event {
-            if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
-                tracing::warn!(%chat_id, error = %err, "context usage write failed");
+        match &event {
+            AgentEvent::ContextUsage { tokens, window } => {
+                if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
+                    tracing::warn!(%chat_id, error = %err, "context usage write failed");
+                }
+                continue;
             }
-            continue;
+            AgentEvent::ContextUsageSnapshot { tokens, window } => {
+                if let Err(err) = doc_ref.replace_context_usage(*tokens, *window) {
+                    tracing::warn!(%chat_id, error = %err, "context usage write failed");
+                }
+                continue;
+            }
+            _ => {}
         }
         // A native control command may fail while Prime is parked between
         // turns. Keep the failure visible to event subscribers without

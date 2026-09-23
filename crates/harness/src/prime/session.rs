@@ -52,6 +52,43 @@ async fn emit(tx: &EventTx, event: AgentEvent) -> bool {
     tx.send(Ok(event)).await.is_ok()
 }
 
+async fn refresh_context_usage(client: &PrimeClient, tx: &EventTx) -> bool {
+    let stats = match tokio::time::timeout(
+        Duration::from_secs(5),
+        client.request("get_session_stats", json!({})),
+    )
+    .await
+    {
+        Ok(Ok(stats)) => stats,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Prime context usage refresh failed");
+            return false;
+        }
+        Err(_) => {
+            tracing::warn!("Prime context usage refresh timed out");
+            return false;
+        }
+    };
+    if !stats.is_object() {
+        tracing::warn!("Prime get_session_stats returned invalid data");
+        return false;
+    }
+    let usage = &stats["contextUsage"];
+    let (tokens, window) = if usage.is_null() {
+        (None, None)
+    } else if let (Some(window), tokens) = (
+        usage["contextWindow"].as_u64().filter(|window| *window > 0),
+        usage["tokens"].as_u64(),
+    ) && (usage["tokens"].is_null() || tokens.is_some())
+    {
+        (tokens, Some(window))
+    } else {
+        tracing::warn!("Prime get_session_stats returned invalid contextUsage");
+        return false;
+    };
+    emit(tx, AgentEvent::ContextUsageSnapshot { tokens, window }).await
+}
+
 fn selected_model(value: &str) -> Result<(String, String), HarnessError> {
     value
         .split_once('/')
@@ -150,6 +187,7 @@ async fn setup(
         },
     )
     .await;
+    let _ = refresh_context_usage(client, tx).await;
     // The RPC state is authoritative for a resumed session whose goal was
     // created before this event subscription. Mark this initial projection so
     // consumers can distinguish it from exact stdout notifications.
@@ -330,6 +368,13 @@ pub(super) async fn run_session(
                     && !emit(&tx, AgentEvent::PrimeEvent { event: without_image_data(&message) }).await
                 {
                     break;
+                }
+                if message["type"] == "compaction_end" && message["result"].is_object() {
+                    if !refresh_context_usage(&client, &tx).await {
+                        let _ = emit(&tx, AgentEvent::ContextUsageSnapshot { tokens: None, window: None }).await;
+                    }
+                } else if message["type"] == "message_end" && message["message"]["role"] == "assistant" {
+                    let _ = refresh_context_usage(&client, &tx).await;
                 }
                 match message.get("type").and_then(Value::as_str) {
                     Some("_transport_closed") => {

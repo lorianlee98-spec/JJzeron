@@ -1035,6 +1035,79 @@ async fn prime_native_events_replay_over_rpc_without_changing_the_transcript() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn prime_context_usage_reaches_the_transcript_watch() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("prime-agent");
+    std::fs::write(
+        &executable,
+        include_str!("../../harness/tests/fixtures/prime-rpc.py"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(PrimeHarness::new().with_executable(&executable)));
+    let core =
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Prime, None).unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let mut events = client
+        .subscribe(
+            zeron_rpc::methods::WATCH_RUN_EVENTS,
+            serde_json::json!({"chatId": CHAT}),
+        )
+        .await
+        .unwrap();
+    let mut request = run_request("parent task");
+    request.cwd = dir.path().display().to_string();
+    core.sessions
+        .dispatch(CHAT, HarnessId::Prime, request, None)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(item) = events.recv().await {
+            if item["event"]["type"] == "inputRequested" {
+                core.sessions
+                    .respond_input(
+                        CHAT,
+                        item["event"]["requestId"].as_str().unwrap(),
+                        vec![UserInputAnswer {
+                            question_id: item["event"]["questions"][0]["id"]
+                                .as_str()
+                                .unwrap()
+                                .into(),
+                            labels: vec!["Yes".into()],
+                        }],
+                    )
+                    .unwrap();
+            }
+            if item["event"]["type"] == "done" {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("Prime turn completed");
+
+    let mut transcript = client
+        .subscribe(
+            zeron_rpc::methods::WATCH_DOC_MESSAGES,
+            serde_json::json!({"chatId": CHAT}),
+        )
+        .await
+        .unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), transcript.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        snapshot["contextUsage"],
+        serde_json::json!({"tokens": 42000, "window": 200000})
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn prime_goal_action_uses_native_rpc_without_a_user_message() {
     use std::os::unix::fs::PermissionsExt;
 

@@ -347,6 +347,28 @@ impl SessionDoc {
         Ok(())
     }
 
+    pub fn replace_context_usage(
+        &self,
+        tokens: Option<u64>,
+        window: Option<u64>,
+    ) -> Result<(), DocError> {
+        let next = zeron_proto::ContextUsage { tokens, window };
+        if next.tokens.is_none() && next.window.is_none() {
+            return if self.context_usage().is_some() {
+                self.clear_context_usage()
+            } else {
+                Ok(())
+            };
+        }
+        if self.context_usage() != Some(next) {
+            self.doc
+                .get_map("meta")
+                .insert("contextUsage", serde_json::to_string(&next)?)?;
+            self.doc.commit();
+        }
+        Ok(())
+    }
+
     pub fn clear_context_usage(&self) -> Result<(), DocError> {
         self.doc.get_map("meta").delete("contextUsage")?;
         self.doc.commit();
@@ -2052,6 +2074,8 @@ mod context_usage_tests {
         );
         host.update_context_usage(None, Some(1_000_000)).unwrap();
         assert_eq!(host.context_usage().unwrap().tokens, Some(0));
+        host.replace_context_usage(None, Some(200_000)).unwrap();
+        assert_eq!(host.context_usage().unwrap().tokens, None);
         let rebuilt = crate::rebuild_thin_doc(&host).unwrap().doc;
         assert_eq!(rebuilt.context_usage(), host.context_usage());
         rebuilt.clear_context_usage().unwrap();

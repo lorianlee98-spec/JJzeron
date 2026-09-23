@@ -100,6 +100,7 @@ async fn local_catalog_and_persistent_child_stream_follow_prime_rpc() {
         (None, "default", "local/configured"),
         (Some(session_file.clone()), "other/second", "other/second"),
     ] {
+        let expected_initial = resume.as_ref().map(|_| 12_000);
         let (_steer_tx, steering) = mpsc::channel(1);
         let controls = RunControls {
             steering,
@@ -144,6 +145,21 @@ async fn local_catalog_and_persistent_child_stream_follow_prime_rpc() {
         assert!(events.iter().any(|event| matches!(event,
             AgentEvent::SessionStarted { session_id, model, .. }
                 if session_id == &session_file && model == expected_model)));
+        let context: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::ContextUsageSnapshot { tokens, window } => Some((*tokens, *window)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            context,
+            vec![
+                (expected_initial, Some(200_000)),
+                (None, Some(200_000)),
+                (Some(42_000), Some(200_000)),
+            ]
+        );
         assert!(events.iter().any(|event| matches!(event,
             AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. }
                 if name == "Agent: child task")));

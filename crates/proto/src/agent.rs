@@ -424,6 +424,12 @@ pub enum AgentEvent {
         tokens: Option<u64>,
         window: Option<u64>,
     },
+    /// Complete provider snapshot; unlike partial measurements, None clears a field.
+    #[serde(rename_all = "camelCase")]
+    ContextUsageSnapshot {
+        tokens: Option<u64>,
+        window: Option<u64>,
+    },
     /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
     #[serde(rename_all = "camelCase")]
     Usage {

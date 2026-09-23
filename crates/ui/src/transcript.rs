@@ -3023,6 +3023,7 @@ pub struct Transcript {
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
+    last_prime_activity: (bool, bool),
     chat_id: Option<String>,
     /// The shell may retain this already-laid-out view briefly for its exit.
     /// Cleared as soon as the exit is invisible; never used for another chat.
@@ -3351,6 +3352,7 @@ impl Transcript {
             list,
             rows: Vec::new(),
             last_source: None,
+            last_prime_activity: (false, false),
             // Pre-set so `sync` never sees an attach edge — an override
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
@@ -4455,6 +4457,16 @@ impl Transcript {
             replay,
             self.state.read(cx).transcript_revision,
         );
+        let activity = if self.doc_override.is_none() {
+            let state = self.state.read(cx);
+            (state.prime_retrying, state.prime_compacting)
+        } else {
+            (false, false)
+        };
+        if self.last_prime_activity != activity {
+            self.last_prime_activity = activity;
+            cx.notify();
+        }
         if self.last_source.as_ref() == Some(&source) {
             return;
         }
@@ -6204,10 +6216,26 @@ impl Transcript {
                 self.compact_last_elapsed.insert(entry_id, elapsed_secs);
             }
         }
+        let prime_activity = if self.doc_override.is_none() {
+            let state = self.state.read(cx);
+            if state.selected_chat.as_deref() != self.chat_id.as_deref() {
+                None
+            } else if state.prime_compacting {
+                Some("Compacting context")
+            } else if state.prime_retrying {
+                Some("Retrying model request")
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let word = if queued {
             "Queued — will send automatically"
         } else if sending {
             "Sending"
+        } else if let Some(activity) = prime_activity {
+            activity
         } else {
             flavour_word(seed, elapsed_secs)
         };
