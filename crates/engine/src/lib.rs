@@ -802,36 +802,24 @@ impl Engine {
             tokens: Arc::new(auth.clone()),
         });
         core.previews.start(projects, preview_signaling).await;
-        // Portable Windows packages explicitly configure an update feed; users
-        // should not need to enable workspace sync to receive application updates.
-        let check_updates = edge_enabled;
-        #[cfg(windows)]
-        let check_updates = check_updates
-            || matches!(
-                zeron_update::detect_install(),
-                zeron_update::InstallKind::WindowsPortable { .. }
-            );
-        if check_updates {
-            // Release checker: polls {edge}/releases on a 6h cadence; headless
-            // installs with ZERON_AUTO_UPDATE=1 apply + restart themselves — gated
-            // on quiescence so a restart never lands under a live run or open PTY.
-            let quiescent: zeron_update::QuiescentCheck = {
-                let sessions = core.sessions.clone();
-                let terminals = core.terminals.clone();
-                Arc::new(move || !sessions.any_active() && !terminals.any_open())
-            };
-            let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
-            if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
-                let updater_for_tokens = updater.clone();
-                let wake = tokio::spawn(async move {
-                    while token_changes.changed().await.is_ok() {
-                        updater_for_tokens.check_now();
-                    }
-                });
-                core.set_updater_wake(wake);
-            }
-            core.set_updater(updater);
+        // GitHub Releases are available in local and synced workspaces alike.
+        // Managed headless installs apply only after sessions and terminals go idle.
+        let quiescent: zeron_update::QuiescentCheck = {
+            let sessions = core.sessions.clone();
+            let terminals = core.terminals.clone();
+            Arc::new(move || !sessions.any_active() && !terminals.any_open())
+        };
+        let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        if let Some(mut token_changes) = edge.as_ref().and_then(EdgeConfig::token_changes) {
+            let updater_for_tokens = updater.clone();
+            let wake = tokio::spawn(async move {
+                while token_changes.changed().await.is_ok() {
+                    updater_for_tokens.check_now();
+                }
+            });
+            core.set_updater_wake(wake);
         }
+        core.set_updater(updater);
         tracing::info!(device_id = %core.device_id, "engine core assembled");
         // Managed ACP adapters install in the background at boot (agents
         // whose CLI is present but whose adapter isn't yet), so a first chat

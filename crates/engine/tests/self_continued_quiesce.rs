@@ -18,8 +18,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use serde_json::json;
 use tokio::sync::{Mutex, mpsc};
 
+use zeron_doc::{MessagePart, MessageRole, MessageStatus};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
@@ -71,9 +73,9 @@ fn done(status: DoneStatus) -> AgentEvent {
     }
 }
 
-fn session_started() -> AgentEvent {
+fn session_started(harness: HarnessId) -> AgentEvent {
     AgentEvent::SessionStarted {
-        harness: HarnessId::Mock,
+        harness,
         model: "mock-1".into(),
         tools: vec![],
         cwd: "/tmp".into(),
@@ -89,6 +91,7 @@ fn text(t: &str) -> AgentEvent {
 /// Feed-by-hand harness (see `turn_quiesce.rs`): the test pushes events
 /// through a channel; accepted steers confirm with a `Steered` boundary.
 struct FeedHarness {
+    id: HarnessId,
     main_prompt: String,
     feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
 }
@@ -96,7 +99,7 @@ struct FeedHarness {
 #[async_trait]
 impl Harness for FeedHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        self.id
     }
     fn display_name(&self) -> &str {
         "Feed"
@@ -106,6 +109,9 @@ impl Harness for FeedHarness {
     }
     fn steering_mode(&self) -> SteeringMode {
         SteeringMode::StepBoundary
+    }
+    fn deterministic_turn_end(&self) -> bool {
+        self.id == HarnessId::Prime
     }
     fn reasoning_levels(&self) -> &[ReasoningLevel] {
         &[ReasoningLevel::Medium]
@@ -170,16 +176,17 @@ struct Rig {
     _dir: tempfile::TempDir,
 }
 
-fn assemble(main_prompt: &str) -> Rig {
+fn assemble(main_prompt: &str, harness: HarnessId) -> Rig {
     init_env();
     let (feed, rx) = mpsc::unbounded_channel();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(FeedHarness {
+        id: harness,
         main_prompt: main_prompt.into(),
         feed: Mutex::new(Some(rx)),
     }));
     let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), harness, None)
         .expect("engine core assembles");
     Rig {
         core,
@@ -208,7 +215,7 @@ where
 
 #[tokio::test]
 async fn self_continued_turn_parks_on_the_short_window() {
-    let rig = assemble("watch the build");
+    let rig = assemble("watch the build", HarnessId::Mock);
     rig.core
         .sessions
         .dispatch(CHAT, HarnessId::Mock, run_request("watch the build"), None)
@@ -216,7 +223,7 @@ async fn self_continued_turn_parks_on_the_short_window() {
         .expect("dispatch");
 
     // Turn 1 completes normally → parked Idle.
-    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(session_started(HarnessId::Mock)).unwrap();
     rig.feed.send(text("I will watch the build.")).unwrap();
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
@@ -249,7 +256,7 @@ async fn self_continued_turn_parks_on_the_short_window() {
 
 #[tokio::test]
 async fn steered_turn_keeps_the_normal_window() {
-    let rig = assemble("watch the build again");
+    let rig = assemble("watch the build again", HarnessId::Mock);
     rig.core
         .sessions
         .dispatch(
@@ -261,7 +268,7 @@ async fn steered_turn_keeps_the_normal_window() {
         .await
         .expect("dispatch");
 
-    rig.feed.send(session_started()).unwrap();
+    rig.feed.send(session_started(HarnessId::Mock)).unwrap();
     rig.feed.send(text("Watching.")).unwrap();
     rig.feed.send(done(DoneStatus::Completed)).unwrap();
     wait_for(
@@ -309,5 +316,94 @@ async fn steered_turn_keeps_the_normal_window() {
     )
     .await;
 
+    rig.core.sessions.shutdown().await;
+}
+
+#[tokio::test]
+async fn prime_interim_end_stays_in_turn_and_native_wake_reopens() {
+    let rig = assemble("start a child", HarnessId::Prime);
+    rig.core
+        .sessions
+        .dispatch(CHAT, HarnessId::Prime, run_request("start a child"), None)
+        .await
+        .expect("dispatch");
+    rig.feed.send(session_started(HarnessId::Prime)).unwrap();
+    rig.feed.send(text("The child is ")).unwrap();
+    rig.feed
+        .send(AgentEvent::PrimeEvent {
+            event: json!({"type":"agent_end"}),
+        })
+        .unwrap();
+    rig.feed
+        .send(AgentEvent::PrimeEvent {
+            event: json!({"type":"auto_retry_start"}),
+        })
+        .unwrap();
+    rig.feed
+        .send(AgentEvent::PrimeEvent {
+            event: json!({"type":"message_end","message":{"role":"custom","customType":"refinement_outcome"}}),
+        })
+        .unwrap();
+    rig.feed.send(text("still running.")).unwrap();
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "Prime foreground turn to park",
+    )
+    .await;
+    let first_reply: Vec<_> = rig
+        .core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .collect();
+    assert_eq!(first_reply.len(), 1);
+    assert!(first_reply[0].parts.iter().any(|part| {
+        matches!(part, MessagePart::Text { text, .. } if text == "The child is still running.")
+    }));
+
+    rig.feed
+        .send(AgentEvent::PrimeEvent {
+            event: json!({"type":"agent_start"}),
+        })
+        .unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Working),
+        "Prime native wake to reopen Working",
+    )
+    .await;
+    rig.feed.send(text("The child finished.")).unwrap();
+    rig.feed.send(done(DoneStatus::Completed)).unwrap();
+    rig.feed
+        .send(AgentEvent::PrimeEvent {
+            event: json!({"type":"lifecycle_update","phase":"quiescent"}),
+        })
+        .unwrap();
+    wait_for(
+        || status(&rig.core) == Some(SessionStatus::Idle),
+        "Prime resumed turn to park",
+    )
+    .await;
+    let replies: Vec<_> = rig
+        .core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.role == MessageRole::Assistant)
+        .collect();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[1].status, Some(MessageStatus::Complete));
+    assert!(replies[1].parts.iter().any(|part| {
+        matches!(part, MessagePart::Text { text, .. } if text == "The child finished.")
+    }));
     rig.core.sessions.shutdown().await;
 }

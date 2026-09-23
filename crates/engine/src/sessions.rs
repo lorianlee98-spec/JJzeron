@@ -330,7 +330,7 @@ impl SessionsEngine {
         request: RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
-        self.dispatch_with(chat_id, harness_id, request, message_id, false)
+        self.dispatch_with(chat_id, harness_id, request, message_id, false, true)
             .await
     }
 
@@ -346,8 +346,16 @@ impl SessionsEngine {
         request: RunRequest,
         message_id: Option<String>,
         startup_retry: bool,
+        record_user_message: bool,
     ) -> futures::future::BoxFuture<'a, Result<String, EngineError>> {
-        Box::pin(self.dispatch_inner(chat_id, harness_id, request, message_id, startup_retry))
+        Box::pin(self.dispatch_inner(
+            chat_id,
+            harness_id,
+            request,
+            message_id,
+            startup_retry,
+            record_user_message,
+        ))
     }
 
     async fn dispatch_inner(
@@ -357,6 +365,7 @@ impl SessionsEngine {
         mut request: RunRequest,
         mut message_id: Option<String>,
         startup_retry: bool,
+        record_user_message: bool,
     ) -> Result<String, EngineError> {
         // Project-less chats store cwd `~` (the creating device can't know the
         // host's home); expand it here, on the host, where the run spawns.
@@ -391,13 +400,15 @@ impl SessionsEngine {
                     } else {
                         zeron_proto::invocation::harness_prompt(&request.prompt, harness_id)
                     },
-                    message_id: Some(user_id.clone()),
+                    message_id: record_user_message.then_some(user_id.clone()),
                 };
                 if steer_tx.try_send(message).is_ok() {
-                    pending.push_back(RoutedSteer {
-                        prompt: request.prompt.clone(),
-                        message_id: user_id.clone(),
-                    });
+                    if record_user_message {
+                        pending.push_back(RoutedSteer {
+                            prompt: request.prompt.clone(),
+                            message_id: user_id.clone(),
+                        });
+                    }
                     true
                 } else {
                     false
@@ -406,8 +417,10 @@ impl SessionsEngine {
                 false
             };
             if accepted {
-                let handle = self.doc_handle(chat_id)?;
-                handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                if record_user_message {
+                    let handle = self.doc_handle(chat_id)?;
+                    handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+                }
                 if self.is_live(chat_id, &run_id) {
                     // Working BEFORE the lastMessageAt bump: both ride the
                     // workspace doc from this one peer, so causal order makes it
@@ -415,7 +428,9 @@ impl SessionsEngine {
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
-                    self.inner.note_message(chat_id, &request.prompt);
+                    if record_user_message {
+                        self.inner.note_message(chat_id, &request.prompt);
+                    }
                     return Ok(run_id);
                 }
                 // The run died around the send. If its exit drain already
@@ -427,7 +442,7 @@ impl SessionsEngine {
                     ledger.retain(|s| s.message_id != user_id);
                     ledger.len() != before
                 };
-                if !reclaimed {
+                if !reclaimed && record_user_message {
                     self.inner.note_message(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
@@ -450,7 +465,9 @@ impl SessionsEngine {
         let harness = self.inner.registry.resolve(harness_id)?;
         let handle = self.doc_handle(chat_id)?;
         let user_id = message_id.unwrap_or_else(new_id);
-        handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        if record_user_message {
+            handle.write_user_message(&user_id, &request.prompt, now_ms())?;
+        }
 
         // Engine-owned resume (zeron sessions.ts:736 — every dispatch read the
         // chat's stored harness session): callers always send `resume: None`;
@@ -512,14 +529,16 @@ impl SessionsEngine {
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
-        self.inner.note_message(chat_id, &request.prompt);
+        if record_user_message {
+            self.inner.note_message(chat_id, &request.prompt);
+        }
 
         // Name the chat NOW, off the first prompt — not after the first
         // exchange completes ("called New session for a long time for no
         // reason"; the titler only needs the prompt and skips titled chats;
         // the Done-time call below stays as the retry for a failed
         // generation).
-        if let Some(titles) = self.inner.titles.get() {
+        if record_user_message && let Some(titles) = self.inner.titles.get() {
             titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
         }
 
@@ -537,6 +556,7 @@ impl SessionsEngine {
                 user_message_id: user_id,
                 resume_injected,
                 startup_retry,
+                record_user_message,
             },
         ));
         Ok(run_id)
@@ -633,21 +653,35 @@ impl SessionsEngine {
             return Err(EngineError::Other("invalid goal action".into()));
         }
         let prompt = format!("/goal {action}");
-        if let Some(run) = lock(&self.inner.runs).get(chat_id) {
-            if run.runtime_config.harness_id != harness_id || !run.steerable {
+        let warm = lock(&self.inner.runs).get(chat_id).map(|run| {
+            (
+                run.runtime_config.harness_id,
+                run.steerable,
+                run.steer_tx.clone(),
+            )
+        });
+        if let Some((live_harness, steerable, steer_tx)) = warm {
+            if live_harness != harness_id || !steerable {
                 return Err(EngineError::Other(
                     "chat has a different active session".into(),
                 ));
             }
-            return run
-                .steer_tx
+            let after_seq = self
+                .inner
+                .journal
+                .last_event(chat_id)?
+                .map(|(seq, _)| seq)
+                .unwrap_or(0);
+            let (replay, events) = self.subscribe(chat_id, after_seq)?;
+            steer_tx
                 .try_send(SteerMessage {
                     prompt,
                     message_id: None,
                 })
                 .map_err(|error| {
                     EngineError::Other(format!("goal command was not accepted: {error}"))
-                });
+                })?;
+            return wait_for_goal_action(replay, events, after_seq, harness_id, action).await;
         }
 
         let latest = self
@@ -698,8 +732,16 @@ impl SessionsEngine {
         request.worktree = None;
 
         if action == "resume" {
-            self.dispatch(chat_id, harness_id, request, None).await?;
-            return Ok(());
+            let after_seq = self
+                .inner
+                .journal
+                .last_event(chat_id)?
+                .map(|(seq, _)| seq)
+                .unwrap_or(0);
+            let (replay, events) = self.subscribe(chat_id, after_seq)?;
+            self.dispatch_with(chat_id, harness_id, request, None, false, false)
+                .await?;
+            return wait_for_goal_action(replay, events, after_seq, harness_id, action).await;
         }
 
         let harness = self.inner.registry.resolve(harness_id)?;
@@ -736,7 +778,10 @@ impl SessionsEngine {
             ))
         })
         .await;
-        interrupt.cancel();
+        if harness_id != HarnessId::Prime || !matches!(&result, Ok(Ok(_))) {
+            interrupt.cancel();
+        }
+        drop(stream);
         drop(steer_tx);
         let update = result
             .map_err(|_| EngineError::Other("goal command timed out".into()))??
@@ -1597,6 +1642,60 @@ struct RunResumeState {
     user_message_id: String,
     resume_injected: bool,
     startup_retry: bool,
+    record_user_message: bool,
+}
+
+async fn wait_for_goal_action(
+    replay: Vec<JournaledEvent>,
+    mut events: broadcast::Receiver<JournaledEvent>,
+    after_seq: u64,
+    harness_id: HarnessId,
+    action: &str,
+) -> Result<(), EngineError> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut pending: std::collections::VecDeque<_> = replay.into();
+        loop {
+            let item = match pending.pop_front() {
+                Some(item) => item,
+                None => events.recv().await.map_err(|error| {
+                    EngineError::Other(format!("goal event stream closed: {error}"))
+                })?,
+            };
+            if item.seq <= after_seq {
+                continue;
+            }
+            let goal = match &item.event {
+                AgentEvent::GoalUpdate { harness, goal } if *harness == harness_id => {
+                    Some(goal.as_ref())
+                }
+                AgentEvent::PrimeEvent { event }
+                    if harness_id == HarnessId::Prime && event["type"] == "goal_update" =>
+                {
+                    Some(event.get("goal").filter(|goal| !goal.is_null()))
+                }
+                AgentEvent::Error { message } => return Err(EngineError::Other(message.clone())),
+                AgentEvent::Done {
+                    error: Some(message),
+                    ..
+                } => return Err(EngineError::Other(message.clone())),
+                _ => None,
+            };
+            let Some(goal) = goal else { continue };
+            let matches_action = match action {
+                "pause" => goal.is_some_and(|goal| goal["status"] == "paused"),
+                "resume" => goal.is_some_and(|goal| goal["status"] == "active"),
+                "clear" => {
+                    goal.is_none_or(|goal| goal["status"] == "idle" || goal["status"] == "cleared")
+                }
+                _ => false,
+            };
+            if matches_action {
+                return Ok(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| EngineError::Other("goal command timed out".into()))?
 }
 
 fn cursor_unstarted_history(
@@ -1791,6 +1890,9 @@ async fn drive_run(
     // a session nobody comes back to (zeron SESSION_IDLE_MS).
     const SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
     let mut idle_since: Option<tokio::time::Instant> = None;
+    // Prime's foreground reply can finish while the daemon still owns RLM or
+    // kernel background work. Its strong completion event releases the reaper.
+    let mut prime_quiescent = true;
     let steerable = harness.supports_steering();
     // TURN-QUIESCE WATCHDOG (2026-08-12 stuck-Working incident): a harness
     // that loses a turn's Done — the adapter never settles `session/prompt`
@@ -1887,7 +1989,7 @@ async fn drive_run(
                 // was finalized at Done, so this end is clean — no aborted stamp.
                 _ = tokio::time::sleep_until(
                     idle_since.map(|at| at + SESSION_IDLE).unwrap_or_else(tokio::time::Instant::now)
-                ), if idle_since.is_some() => {
+                ), if idle_since.is_some() && (harness_id != HarnessId::Prime || prime_quiescent) => {
                     tracing::info!(chat = %chat_id, "reaping idle persistent session");
                     if let Some(token) = lock(&inner.runs)
                         .get(&chat_id)
@@ -2033,8 +2135,37 @@ async fn drive_run(
         // when a persistent session is parked after its last Done.
         if matches!(
             &event,
-            AgentEvent::PrimeEvent { .. } | AgentEvent::GoalUpdate { .. }
+            AgentEvent::PrimeEvent { .. }
+                | AgentEvent::GoalUpdate { .. }
+                | AgentEvent::TurnStarted { .. }
         ) {
+            if let AgentEvent::PrimeEvent { event: native } = &event {
+                if native["type"] == "agent_start" && idle_since.is_some() {
+                    idle_since = None;
+                    prime_quiescent = false;
+                    self_continued_turn = true;
+                    entry_id = new_id();
+                    segment_started = now_ms();
+                    inner.set_status(&chat_id, SessionStatus::Working, true);
+                } else if native["type"] == "lifecycle_update" && native["phase"] == "quiescent" {
+                    prime_quiescent = true;
+                }
+            } else if matches!(
+                &event,
+                AgentEvent::TurnStarted {
+                    harness: HarnessId::Codex,
+                    ..
+                }
+            ) && idle_since.is_some()
+            {
+                idle_since = None;
+                entry_id = new_id();
+                segment_started = now_ms();
+                // Codex supplies turn/completed; the ACP-only quiesce timer
+                // must not guess when this native turn ends.
+                self_continued_turn = false;
+                inner.set_status(&chat_id, SessionStatus::Working, true);
+            }
             inner.touch_session(&chat_id);
             last_stream_activity = tokio::time::Instant::now();
             inner.publish(&chat_id, &event);
@@ -2400,7 +2531,14 @@ async fn drive_run(
                 // The user entry write inside dispatch is idempotent by
                 // message id; `startup_retry` makes this attempt final.
                 if let Err(err) = engine
-                    .dispatch_with(&chat, harness_id, retry, Some(message_id), true)
+                    .dispatch_with(
+                        &chat,
+                        harness_id,
+                        retry,
+                        Some(message_id),
+                        true,
+                        resume_state.record_user_message,
+                    )
                     .await
                 {
                     tracing::error!(chat = %chat, error = %err, "startup-crash retry dispatch failed");
@@ -2551,6 +2689,7 @@ async fn drive_run(
             // Exchange completed on an untitled chat → name it (fire-and-forget;
             // interrupted/errored turns never trigger naming).
             if *status == DoneStatus::Completed
+                && resume_state.record_user_message
                 && let Some(titles) = inner.titles.get()
             {
                 titles.maybe_generate(&chat_id, harness_id, &user_prompt, &run_cwd);
@@ -2568,6 +2707,9 @@ async fn drive_run(
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
             if *status == DoneStatus::Completed && steerable && !interrupted {
+                if harness_id == HarnessId::Prime {
+                    prime_quiescent = false;
+                }
                 folded.clear();
                 dirty = false;
                 entry_id = new_id();

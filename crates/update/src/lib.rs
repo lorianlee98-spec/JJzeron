@@ -2,7 +2,7 @@
 //! background checker + `ApplyUpdate`), the CLI (`jjzeron update`), and the UI
 //! (the sidebar update strip + macOS bundle swap).
 //!
-//! Release layout: an explicitly configured JJzeron feed serves artifacts.
+//! Release layout: JJzeron's GitHub Releases serve artifacts by default.
 //! `manifest.json` carries the latest version plus a
 //! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
 //! releases published before the manifest existed.
@@ -44,6 +44,8 @@ const CHECK_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(
 /// While an auto-apply is deferred behind active sessions, re-probe idleness
 /// this often.
 const IDLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const DEFAULT_RELEASES_URL: &str =
+    "https://github.com/lorianlee98-spec/JJzeron/releases/latest/download";
 
 // ---------------------------------------------------------------------------
 // Release metadata
@@ -246,7 +248,7 @@ fn configured_release_base(
     if let Some(url) = portable_url {
         return validate_release_override(url);
     }
-    bail!("JJzeron update feed is not configured (set ZERON_RELEASES_URL)")
+    Ok(DEFAULT_RELEASES_URL.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -973,12 +975,10 @@ mod tests {
     }
 
     #[test]
-    fn update_feed_requires_explicit_configuration() {
-        assert!(
-            configured_release_base(None, None)
-                .unwrap_err()
-                .to_string()
-                .contains("JJzeron update feed is not configured")
+    fn update_feed_uses_fork_by_default_and_allows_override() {
+        assert_eq!(
+            configured_release_base(None, None).unwrap(),
+            "https://github.com/lorianlee98-spec/JJzeron/releases/latest/download"
         );
         assert_eq!(
             configured_release_base(Some("https://fork.example/releases"), None).unwrap(),

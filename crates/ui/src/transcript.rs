@@ -7282,6 +7282,7 @@ impl Transcript {
                 .into_any_element();
         }
 
+        let workspace_link = self.link_ui();
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
@@ -7403,6 +7404,30 @@ impl Transcript {
                         .flex_col()
                         .overflow_hidden();
                     if let Some(invocation) = invocation.as_deref() {
+                        let invocation_body = detail_body(invocation, None, theme);
+                        let invocation_body = if let (Some(path), Some(link)) =
+                            (tool_file_path(&tool.call), workspace_link.clone())
+                        {
+                            let path = path.to_owned();
+                            div()
+                                .id(SharedString::from(format!("{key}-file-path")))
+                                .cursor_pointer()
+                                .hover(|row| row.bg(theme.ink(0.04)))
+                                .on_click(move |_, window, cx| {
+                                    render::activate_link(
+                                        render::LinkTarget::new(&path, &path),
+                                        render::LinkAction::Primary,
+                                        Some(&link),
+                                        window,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                })
+                                .child(invocation_body)
+                                .into_any_element()
+                        } else {
+                            invocation_body
+                        };
                         panel = panel
                             .child(
                                 div()
@@ -7410,7 +7435,7 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(invocation, None, theme));
+                            .child(invocation_body);
                     }
                     if let Some(detail) = detail.as_deref() {
                         panel = panel
@@ -7760,6 +7785,35 @@ fn file_badge_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+fn tool_file_path(call: &ToolCall) -> Option<&str> {
+    match call {
+        ToolCall::ReadFile { path }
+        | ToolCall::WriteFile { path, .. }
+        | ToolCall::EditFile { path, .. }
+        | ToolCall::ApplyPatch { path: Some(path) } => Some(path),
+        _ => None,
+    }
+}
+
+fn file_change_counts(tool: &ToolItem, path: &str) -> Option<(u64, u64)> {
+    if !matches!(
+        tool.call,
+        ToolCall::WriteFile { .. } | ToolCall::EditFile { .. } | ToolCall::ApplyPatch { .. }
+    ) {
+        return None;
+    }
+    match tool.detail.as_deref()? {
+        ToolDetail::Stats { stats } => stats
+            .iter()
+            .find(|stat| stat.path == path)
+            .map(|stat| (stat.additions, stat.deletions)),
+        ToolDetail::Diff { file, .. } if file.path == path => {
+            Some((file.additions as u64, file.deletions as u64))
+        }
+        _ => None,
+    }
+}
+
 /// The body of an expanded chip card, under the header's separator. Diffs
 /// render through the changes pane's section body — the real component, with
 /// hunk headers, dual line-number gutters, accent bars, row washes, and
@@ -7979,13 +8033,7 @@ fn chip_header_row(
         ToolItemKind::Call => tool_chip_content(&tool.call),
     };
     let activity = !is_agent_tool(tool);
-    let file_path = match &tool.call {
-        ToolCall::ReadFile { path }
-        | ToolCall::WriteFile { path, .. }
-        | ToolCall::EditFile { path, .. }
-        | ToolCall::ApplyPatch { path: Some(path) } => Some(path.as_str()),
-        _ => None,
-    };
+    let file_path = tool_file_path(&tool.call);
     let running = tool.subagent_ref.is_some()
         && matches!(tool.subagent_status, Some(SubagentStatus::Running));
     let failed = tool.is_error
@@ -8081,7 +8129,7 @@ fn chip_header_row(
                     theme.text.opacity(0.85)
                 })
                 .child(if let Some(path) = file_path {
-                    let badge = div()
+                    let mut badge = div()
                         .min_w_0()
                         .h(px(22.0))
                         .flex()
@@ -8119,19 +8167,32 @@ fn chip_header_row(
                                 .min_w_0()
                                 .truncate()
                                 .child(SharedString::from(file_badge_name(path).to_owned())),
-                        )
-                        .map(|badge| {
-                            if hover_text {
-                                badge
-                                    .id("tool-file-badge")
-                                    .group_hover("tool-header", |style| {
-                                        style.text_color(theme.text)
-                                    })
-                                    .into_any_element()
-                            } else {
-                                badge.into_any_element()
-                            }
-                        });
+                        );
+                    if let Some((additions, deletions)) = file_change_counts(tool, path) {
+                        badge = badge
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.success)
+                                    .child(SharedString::from(format!("+{additions}"))),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme.danger)
+                                    .child(SharedString::from(format!("−{deletions}"))),
+                            );
+                    }
+                    let badge = badge.map(|badge| {
+                        if hover_text {
+                            badge
+                                .id("tool-file-badge")
+                                .group_hover("tool-header", |style| style.text_color(theme.text))
+                                .into_any_element()
+                        } else {
+                            badge.into_any_element()
+                        }
+                    });
                     crate::frost::frosted(5.0, 16.0, badge).into_any_element()
                 } else {
                     div()

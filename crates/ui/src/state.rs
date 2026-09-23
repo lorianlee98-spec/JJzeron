@@ -712,6 +712,7 @@ pub struct AppState {
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
     pub active_goal: Option<(zeron_proto::HarnessId, serde_json::Value)>,
+    pub prime_background: bool,
     run_events_task: Option<Task<()>>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
@@ -809,6 +810,7 @@ impl AppState {
             selected_device: None,
             selected_chat: None,
             active_goal: None,
+            prime_background: false,
             run_events_task: None,
             transcript: Vec::new(),
             queue: Vec::new(),
@@ -967,6 +969,7 @@ impl AppState {
             self.selected_chat = None;
             self.run_events_task = None;
             self.active_goal = None;
+            self.prime_background = false;
             self.transcript.clear();
             self.context_usage = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
@@ -1788,6 +1791,7 @@ impl AppState {
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
         self.run_events_task = None;
         self.active_goal = None;
+        self.prime_background = false;
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
@@ -1944,6 +1948,7 @@ impl AppState {
         // Re-subscribe the transcript if a chat was already selected (reconnect path).
         if let Some(chat_id) = self.selected_chat.clone() {
             self.active_goal = None;
+            self.prime_background = false;
             self.run_events_task =
                 Some(spawn_run_events_watch(cx, handle.clone(), chat_id.clone()));
             self.transcript_task =
@@ -2114,6 +2119,7 @@ impl AppState {
         self.selected_chat = chat_id.clone();
         self.run_events_task = None;
         self.active_goal = None;
+        self.prime_background = false;
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
@@ -2797,6 +2803,7 @@ fn spawn_run_events_watch(
                                 .update(cx, |state, cx| {
                                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
                                         state.active_goal = None;
+                                        state.prime_background = false;
                                         cx.notify();
                                     }
                                 })
@@ -2805,6 +2812,43 @@ fn spawn_run_events_watch(
                                 return;
                             }
                             continue;
+                        }
+                        if event["type"] == "primeEvent" {
+                            let native = &event["event"];
+                            if native["type"] == "lifecycle_update"
+                                || native["type"] == "agent_start"
+                                || native["type"] == "session_closed"
+                            {
+                                let background = native["type"] == "lifecycle_update"
+                                    && native["phase"] == "background"
+                                    && native["hasRunningRlmChildren"] != true;
+                                if this
+                                    .update(cx, |state, cx| {
+                                        if state.selected_chat.as_deref() == Some(chat_id.as_str())
+                                        {
+                                            state.prime_background = background;
+                                            cx.notify();
+                                        }
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
+                        if event["type"] == "done" && event["status"] != "completed" {
+                            if this
+                                .update(cx, |state, cx| {
+                                    if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
+                                        state.prime_background = false;
+                                        cx.notify();
+                                    }
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                         let update = match event["type"].as_str() {
                             Some("primeEvent") if event["event"]["type"] == "goal_update" => {

@@ -44,8 +44,12 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request).await;
-                seen.fetch_add(1, Ordering::SeqCst);
+                let count = stream.read(&mut request).await.unwrap_or(0);
+                // Preview discovery probes every local listener with HEAD /;
+                // that probe is not an Edge worker and may outlive this runtime.
+                if !request[..count].starts_with(b"HEAD / ") {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
                 let body = r#"{"error":"revoked"}"#;
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -314,7 +318,7 @@ async fn clean_local_auth_construction_does_not_probe_edge_health() {
 }
 
 #[tokio::test]
-async fn local_runtime_does_not_start_the_edge_updater() {
+async fn local_runtime_starts_release_checker_without_edge_sync() {
     let dir = tempfile::tempdir().unwrap();
     let (edge_url, requests, edge_task) = rejecting_edge().await;
     let config = config(dir.path(), edge_url, Some("client_test"), None);
@@ -331,8 +335,8 @@ async fn local_runtime_does_not_start_the_edge_updater() {
     assert_eq!(scope, WorkspaceScope::Local);
     assert!(runtime.core().links().is_none());
     assert!(
-        runtime.core().updater().is_none(),
-        "local runtime must not start an Edge updater"
+        runtime.core().updater().is_some(),
+        "local runtime must check JJzeron releases"
     );
     assert_eq!(requests.load(Ordering::SeqCst), 0);
 
@@ -416,7 +420,7 @@ async fn transient_refresh_failure_keeps_synced_recovery_supervisors_alive() {
     );
     assert!(
         runtime.core().updater().is_some(),
-        "the Edge updater supervisor must survive an offline boot"
+        "the release checker must survive an offline boot"
     );
     runtime.shutdown().await;
 }
@@ -629,8 +633,8 @@ async fn headless_sign_out_closes_joined_edge_rooms_and_stops_daemon() {
 }
 
 /// Replacing a synced/online runtime must be a real ownership boundary: after
-/// `shutdown()` returns, no worker may send another Edge request (updater,
-/// room joins), and dropping the runtime must actually free
+/// `shutdown()` returns, no worker may send another Edge request, and dropping
+/// the runtime must actually free
 /// the engine graph — the sessions ⇄ doc-host cycle and the strong-`self`
 /// worker loops previously kept a replaced runtime alive and polling forever.
 #[tokio::test]
@@ -649,11 +653,7 @@ async fn online_runtime_shutdown_stops_edge_workers_and_retires_the_graph() {
         .unwrap();
     let retired = runtime.core().doc_host.retirement_probe();
 
-    // Live traffic proof: the woken release checker (and the room joins) must
-    // be hitting the counting edge before the boundary is exercised.
-    if let Some(updater) = runtime.core().updater() {
-        updater.check_now();
-    }
+    // Live room traffic must reach the counting edge before shutdown.
     wait_until(
         || requests.load(Ordering::SeqCst) >= 2,
         "edge workers never produced traffic before shutdown",

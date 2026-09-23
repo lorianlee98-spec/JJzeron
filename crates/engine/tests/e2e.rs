@@ -1124,13 +1124,18 @@ async fn prime_goal_action_uses_native_rpc_without_a_user_message() {
     .await
     .unwrap();
     assert_eq!(goal["event"]["event"]["goal"]["status"], "paused");
-    client
+    let rejected = client
         .call(
             zeron_rpc::methods::PRIME_GOAL_ACTION,
             serde_json::json!({"chatId": CHAT, "action": "resume"}),
         )
-        .await
-        .unwrap();
+        .await;
+    assert!(
+        rejected
+            .unwrap_err()
+            .to_string()
+            .contains("goal cannot resume")
+    );
     let error = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let item = events.recv().await.expect("run event");
@@ -1172,6 +1177,134 @@ async fn prime_goal_action_uses_native_rpc_without_a_user_message() {
         "/goal pause\n/goal resume\n/goal clear\n"
     );
     assert_eq!(entries(&core), before);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn agent_created_goals_reach_the_frontend_run_event_stream() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (harness_id, binary, fixture) in [
+        (
+            HarnessId::Codex,
+            "codex",
+            include_str!("../../harness/tests/fixtures/fake-codex.sh"),
+        ),
+        (
+            HarnessId::Prime,
+            "prime-agent",
+            include_str!("../../harness/tests/fixtures/prime-rpc.py"),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join(binary);
+        std::fs::write(&executable, fixture).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = HarnessRegistry::new();
+        match harness_id {
+            HarnessId::Codex => {
+                registry.register(Arc::new(CodexHarness::new().with_executable(&executable)));
+            }
+            HarnessId::Prime => {
+                registry.register(Arc::new(PrimeHarness::new().with_executable(&executable)));
+            }
+            _ => unreachable!(),
+        }
+        let core = EngineCore::assemble(dir.path(), Arc::new(registry), harness_id, None).unwrap();
+        let mut request = run_request("scenario:agent-goal");
+        request.cwd = dir.path().display().to_string();
+        core.sessions
+            .dispatch(CHAT, harness_id, request, None)
+            .await
+            .unwrap();
+        let client = zeron_rpc::memory_client(core.rpc_service());
+        // Subscribe after dispatch as the UI does when a chat is selected;
+        // the journal replay must still deliver the agent-created goal.
+        let mut events = client
+            .subscribe(
+                zeron_rpc::methods::WATCH_RUN_EVENTS,
+                serde_json::json!({"chatId": CHAT}),
+            )
+            .await
+            .unwrap();
+        let goal = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let frame = events.recv().await.expect("run event");
+                let event = &frame["event"];
+                let goal = match harness_id {
+                    HarnessId::Codex if event["type"] == "goalUpdate" => &event["goal"],
+                    HarnessId::Prime
+                        if event["type"] == "primeEvent"
+                            && event["event"]["type"] == "goal_update" =>
+                    {
+                        &event["event"]["goal"]
+                    }
+                    _ => continue,
+                };
+                if goal["objective"] == "Agent-created goal" {
+                    break goal.clone();
+                }
+            }
+        })
+        .await
+        .expect("agent-created goal did not reach the UI stream");
+        assert_eq!(goal["status"], "active");
+        core.sessions.shutdown().await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn codex_goal_auto_turn_persists_output_immediately_after_the_previous_turn() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("codex");
+    std::fs::write(
+        &executable,
+        include_str!("../../harness/tests/fixtures/fake-codex.sh"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(CodexHarness::new().with_executable(&executable)));
+    let core =
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Codex, None).unwrap();
+    let mut request = run_request("/goal --budget 5000 Verify JJzeron goals");
+    request.cwd = dir.path().display().to_string();
+    core.sessions
+        .dispatch(CHAT, HarnessId::Codex, request, None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|entry| {
+                entry.parts.iter().any(|part| {
+                    matches!(part, MessagePart::Text { text, .. } if text.contains("Goal work continued"))
+                })
+            })
+        },
+        "second native goal turn in the transcript",
+    )
+    .await;
+    let native_turns = core
+        .sessions
+        .subscribe(CHAT, 0)
+        .unwrap()
+        .0
+        .iter()
+        .filter(|item| {
+            matches!(
+                &item.event,
+                AgentEvent::TurnStarted {
+                    harness: HarnessId::Codex,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(native_turns, 2);
+    core.sessions.shutdown().await;
 }
 
 #[cfg(unix)]
@@ -1326,6 +1459,86 @@ async fn goal_control_reopens_codex_thread_after_restart_without_a_chat_turn() {
                 )
             })
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cold_goal_resume_starts_native_turn_without_a_fake_user_message() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("codex");
+    std::fs::write(
+        &executable,
+        include_str!("../../harness/tests/fixtures/fake-codex.sh"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let assemble = || {
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(CodexHarness::new().with_executable(&executable)));
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Codex, None).unwrap()
+    };
+    let core = assemble();
+    let mut request = run_request("scenario:resumed");
+    request.cwd = dir.path().display().to_string();
+    request.model = Some("goal-fixture".into());
+    core.sessions
+        .dispatch(CHAT, HarnessId::Codex, request, None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .subscribe(CHAT, 0)
+                .unwrap()
+                .0
+                .iter()
+                .any(|item| {
+                    matches!(
+                        item.event,
+                        AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            ..
+                        }
+                    )
+                })
+        },
+        "initial Codex turn",
+    )
+    .await;
+    core.sessions.shutdown().await;
+    drop(core);
+
+    let core = assemble();
+    let before = entries(&core);
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::CODEX_GOAL_ACTION,
+            serde_json::json!({"chatId": CHAT, "action": "resume"}),
+        )
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .subscribe(CHAT, 0)
+                .unwrap()
+                .0
+                .iter()
+                .any(|item| {
+                    matches!(&item.event, AgentEvent::TurnStarted {
+                    harness: HarnessId::Codex,
+                    turn_id,
+                } if turn_id == "goal-resumed-turn")
+                })
+        },
+        "native goal continuation turn",
+    )
+    .await;
+    assert_eq!(entries(&core), before);
+    core.sessions.shutdown().await;
 }
 
 #[tokio::test]

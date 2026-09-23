@@ -21,6 +21,8 @@ enum CommandKind {
     Initial,
     Steer,
     Goal,
+    Completion(u64),
+    Quiescence(u64),
 }
 
 type CommandResult = (CommandKind, String, Result<Value, HarnessError>);
@@ -165,7 +167,7 @@ async fn setup(
 }
 
 pub(super) async fn run_session(
-    mut child: Child,
+    mut child: Option<Child>,
     client: PrimeClient,
     mut incoming: mpsc::UnboundedReceiver<Value>,
     stderr: StderrTail,
@@ -186,7 +188,14 @@ pub(super) async fn run_session(
                 },
             )
             .await;
-            crate::shutdown_child(&mut child, KILL_GRACE).await;
+            if child.is_none() && request.resume.is_none() && client.is_daemon() {
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(5), client.request("kill", json!({})))
+                        .await;
+            }
+            if let Some(child) = child.as_mut() {
+                crate::shutdown_child(child, KILL_GRACE).await;
+            }
             return;
         }
     };
@@ -195,6 +204,9 @@ pub(super) async fn run_session(
     let mut children = Children::default();
     let mut active = true;
     let mut done_current = false;
+    let mut completion_generation = 0;
+    let mut completion_pending = false;
+    let mut transport_error = None;
     let mut interrupted = false;
     let mut steering_open = true;
     let mut steering_pending = false;
@@ -238,8 +250,58 @@ pub(super) async fn run_session(
                             done_current = false;
                         }
                         if !emit(&tx, AgentEvent::Steered { assistant_message_id: None, next_assistant_message_id: None }).await { break; }
+                        if client.is_daemon() {
+                            start_completion(&client, &command_tx, &mut completion_generation, &mut completion_pending);
+                        }
                     }
-                    (CommandKind::Goal, Ok(_)) | (CommandKind::Initial, Ok(_)) => {}
+                    (CommandKind::Goal, Ok(_)) | (CommandKind::Initial, Ok(_)) => {
+                        if client.is_daemon() {
+                            start_completion(&client, &command_tx, &mut completion_generation, &mut completion_pending);
+                        }
+                    }
+                    (CommandKind::Completion(generation), Ok(_)) if generation == completion_generation => {
+                        completion_pending = false;
+                        let terminal = terminal_result(&client).await;
+                        let (status, error) = match terminal {
+                            Ok(result) => result,
+                            Err(error) => (DoneStatus::Errored, Some(error.to_string())),
+                        };
+                        let background = client.request("get_session_summary", json!({})).await.ok()
+                            .filter(|summary| summary["isSessionActive"] == true);
+                        active = false;
+                        done_current = true;
+                        if !emit(&tx, AgentEvent::Done { status, result: None, error, session_id: Some(session_file.clone()) }).await { break; }
+                        if let Some(summary) = background
+                            && !emit(&tx, AgentEvent::PrimeEvent { event: json!({
+                                "type":"lifecycle_update",
+                                "phase":"background",
+                                "hasRunningRlmChildren":summary["hasRunningRlmChildren"],
+                                "isBashRunning":summary["isBashRunning"],
+                                "unfinishedActionCount":summary["unfinishedActionCount"],
+                            }) }).await { break; }
+                        mapper = EventMapper::new();
+                        if !steering_open { break; }
+                        let client = client.clone();
+                        let command_tx = command_tx.clone();
+                        tokio::spawn(async move {
+                            let result = client.request("wait_for_headless_completion", json!({"waitForRlmQuiescence":true})).await;
+                            let _ = command_tx.send((CommandKind::Quiescence(generation), String::new(), result));
+                        });
+                    }
+                    (CommandKind::Quiescence(generation), Ok(_)) if generation == completion_generation => {
+                        if !emit(&tx, AgentEvent::PrimeEvent { event: json!({"type":"lifecycle_update","phase":"quiescent"}) }).await { break; }
+                    }
+                    (CommandKind::Quiescence(generation), Err(error)) if generation == completion_generation => {
+                        if !emit(&tx, AgentEvent::Error { message: error.to_string() }).await { break; }
+                    }
+                    (CommandKind::Completion(generation), Err(error)) if generation == completion_generation => {
+                        completion_pending = false;
+                        if !emit(&tx, AgentEvent::Done { status: DoneStatus::Errored, result: None, error: Some(error.to_string()), session_id: Some(session_file.clone()) }).await { break; }
+                        active = false;
+                        done_current = true;
+                        if !steering_open { break; }
+                    }
+                    (CommandKind::Completion(_), _) | (CommandKind::Quiescence(_), _) => {}
                     (CommandKind::Goal, Err(error)) => {
                         if !emit(&tx, AgentEvent::Error { message: error.to_string() }).await { break; }
                     }
@@ -270,9 +332,22 @@ pub(super) async fn run_session(
                     break;
                 }
                 match message.get("type").and_then(Value::as_str) {
-                    Some("_transport_closed") => break,
-                    Some("agent_start") => { active = true; done_current = false; }
+                    Some("_transport_closed") => {
+                        transport_error = message["error"].as_str().map(str::to_owned);
+                        let _ = emit(&tx, AgentEvent::PrimeEvent { event: json!({
+                            "type":"lifecycle_update", "phase":"disconnected"
+                        }) }).await;
+                        break;
+                    }
+                    Some("agent_start") => {
+                        if client.is_daemon() && done_current && !completion_pending {
+                            start_completion(&client, &command_tx, &mut completion_generation, &mut completion_pending);
+                        }
+                        active = true;
+                        done_current = false;
+                    }
                     Some("agent_end") => {
+                        if client.is_daemon() { continue; }
                         active = false;
                         done_current = true;
                         let error = mapper.failure().map(str::to_owned);
@@ -308,7 +383,7 @@ pub(super) async fn run_session(
                                 let next_action = message["actions"]["active"]["kind"].as_str();
                                 let has_goal_turn = command.may_start_turn && command.error.is_none()
                                     && (next_action == Some("turn") || message["actions"]["queuedCount"].as_u64().is_some_and(|count| count > 0));
-                                if !has_goal_turn {
+                                if !has_goal_turn && !client.is_daemon() {
                                     active = false;
                                     done_current = true;
                                     let status = if command.error.is_some() { DoneStatus::Errored } else { DoneStatus::Completed };
@@ -321,6 +396,15 @@ pub(super) async fn run_session(
                     Some("rlm_child_update") => {
                         for event in children.update(&message["child"], &client, &request.cwd).await {
                             if !emit(&tx, event).await { break; }
+                        }
+                    }
+                    Some("session_attached" | "session_resynced" | "session_replaced") => {
+                        if let Some(snapshot) = message["snapshot"]["children"].as_array() {
+                            for child in snapshot.iter().filter(|child| matches!(child["status"].as_str(), Some("queued" | "running"))) {
+                                for event in children.update(child, &client, &request.cwd).await {
+                                    if !emit(&tx, event).await { break; }
+                                }
+                            }
                         }
                     }
                     Some("observed_session_event") | Some("observed_session_closed") => {
@@ -415,11 +499,16 @@ pub(super) async fn run_session(
             let _ = emit(&tx, event).await;
         }
         if active && !done_current && !interrupted {
-            let error = crate::crash_message(
-                "prime-agent --mode rpc",
-                child.try_wait().ok().flatten(),
-                &stderr,
-            );
+            let error = if let Some(child) = child.as_mut() {
+                crate::crash_message(
+                    "prime-agent --mode rpc",
+                    child.try_wait().ok().flatten(),
+                    &stderr,
+                )
+            } else {
+                transport_error
+                    .unwrap_or_else(|| "Prime daemon session ended before completion".into())
+            };
             let _ = emit(
                 &tx,
                 AgentEvent::Done {
@@ -432,7 +521,70 @@ pub(super) async fn run_session(
             .await;
         }
     }
-    crate::shutdown_child(&mut child, KILL_GRACE).await;
+    if let Some(child) = child.as_mut() {
+        crate::shutdown_child(child, KILL_GRACE).await;
+    }
+}
+
+fn start_completion(
+    client: &PrimeClient,
+    command_tx: &mpsc::UnboundedSender<CommandResult>,
+    generation: &mut u64,
+    pending: &mut bool,
+) {
+    *generation += 1;
+    *pending = true;
+    let current = *generation;
+    let client = client.clone();
+    let command_tx = command_tx.clone();
+    tokio::spawn(async move {
+        let result = client
+            .request("wait_for_headless_completion", json!({}))
+            .await;
+        let _ = command_tx.send((CommandKind::Completion(current), String::new(), result));
+    });
+}
+
+async fn terminal_result(
+    client: &PrimeClient,
+) -> Result<(DoneStatus, Option<String>), HarnessError> {
+    let data = client.request("get_messages", json!({})).await?;
+    let messages = data["messages"].as_array().ok_or_else(|| {
+        HarnessError::Protocol("Prime daemon returned no terminal transcript".into())
+    })?;
+    for message in messages.iter().rev() {
+        if message["role"] == "assistant" {
+            return Ok(match message["stopReason"].as_str() {
+                Some("error") => (
+                    DoneStatus::Errored,
+                    Some(
+                        message["errorMessage"]
+                            .as_str()
+                            .unwrap_or("Prime model request failed")
+                            .into(),
+                    ),
+                ),
+                Some("aborted") => (DoneStatus::Interrupted, None),
+                _ => (DoneStatus::Completed, None),
+            });
+        }
+        if message["customType"] == "session_slash_command_result" {
+            return Ok(if message["details"]["success"] == false {
+                (
+                    DoneStatus::Errored,
+                    Some(
+                        message["details"]["error"]
+                            .as_str()
+                            .unwrap_or("Prime command failed")
+                            .into(),
+                    ),
+                )
+            } else {
+                (DoneStatus::Completed, None)
+            });
+        }
+    }
+    Ok((DoneStatus::Completed, None))
 }
 
 #[derive(Default)]

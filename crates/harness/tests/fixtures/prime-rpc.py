@@ -26,6 +26,13 @@ for line in sys.stdin:
     kind = request["type"]
     request_id = request.get("id")
     if kind == "prompt":
+        if request["message"] == "scenario:agent-goal":
+            send({"type": "response", "id": request_id, "command": "prompt", "success": True})
+            send({"type": "agent_start"})
+            send({"type": "goal_update", "goal": {"status": "active", "objective": "Agent-created goal"}})
+            send({"type": "turn_end", "message": {"role": "assistant"}, "toolResults": []})
+            send({"type": "agent_end"})
+            continue
         if request["message"] == "/goal status":
             send({"type": "response", "id": request_id, "command": "prompt", "success": True})
             send({"type": "session_action_update", "actions": {"active": {"kind": "session_command", "label": "/goal status"}}})

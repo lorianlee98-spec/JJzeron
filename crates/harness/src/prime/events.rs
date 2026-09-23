@@ -61,8 +61,10 @@ impl EventMapper {
                         .filter(|text| !text.is_empty())
                         .unwrap_or("Prime model request failed")
                         .to_owned();
-                    self.failure = Some(message.clone());
-                    vec![AgentEvent::Error { message }]
+                    // Prime may retry this agent_end. The native completion
+                    // barrier decides whether the error is terminal.
+                    self.failure = Some(message);
+                    Vec::new()
                 } else {
                     self.failure = None;
                     Vec::new()
@@ -340,10 +342,7 @@ mod tests {
             vec![AgentEvent::ToolResult { id: "call-1".into(), is_error: false, output: Some("1".into()), diff: None }]
         );
         assert!(mapper.map(&json!({"type":"message_update","assistantMessageEvent":{"type":"text_end","content":"Hello"}})).is_empty());
-        assert_eq!(
-            mapper.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"provider unavailable"}})),
-            vec![AgentEvent::Error { message: "provider unavailable".into() }]
-        );
+        assert!(mapper.map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"provider unavailable"}})).is_empty());
         assert_eq!(mapper.failure(), Some("provider unavailable"));
         assert!(mapper
             .map(&json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop"}}))

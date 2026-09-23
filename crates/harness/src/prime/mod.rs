@@ -2,6 +2,7 @@
 //! extensions, skills, Python kernel, and session files; Zeron only drives it.
 
 mod client;
+mod daemon;
 mod events;
 mod session;
 
@@ -79,7 +80,17 @@ impl PrimeHarness {
         {
             return crate::executable::validate_native_override(&path);
         }
-        crate::executable::find_on_paths("prime-agent", Vec::new()).ok_or_else(|| {
+        let extra = crate::executable::home_dir()
+            .map(|home| {
+                [
+                    home.join(".n/bin/prime-agent"),
+                    home.join(".local/bin/prime-agent"),
+                    home.join(".local/share/prime-agent/bin/prime-agent"),
+                ]
+                .to_vec()
+            })
+            .unwrap_or_default();
+        crate::executable::find_on_paths("prime-agent", extra).ok_or_else(|| {
             HarnessError::NotInstalled(
                 "prime-agent (install Prime Agent or set PRIME_AGENT_EXECUTABLE)".into(),
             )
@@ -287,11 +298,14 @@ fn parse_skills(data: &Value) -> Result<Vec<Skill>, HarnessError> {
             Some(Skill {
                 name: name.to_owned(),
                 path,
-                description: item
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
+                description: if name == "goal" {
+                    "Prime skill for the same persistent goal shown by /goal".into()
+                } else {
+                    item.get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                },
                 enabled: true,
                 command: Some(SkillCommand {
                     name: command.to_owned(),
@@ -323,6 +337,9 @@ impl Harness for PrimeHarness {
         self.resolve_executable().is_ok()
     }
     fn authoritative_prompt_end(&self) -> bool {
+        true
+    }
+    fn deterministic_turn_end(&self) -> bool {
         true
     }
 
@@ -370,8 +387,24 @@ impl Harness for PrimeHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        let (child, client, incoming, stderr) =
-            self.spawn(Path::new(&request.cwd), request.resume.as_deref(), false)?;
+        let (child, client, incoming, stderr) = if self.executable.is_some() {
+            let (child, client, incoming, stderr) =
+                self.spawn(Path::new(&request.cwd), request.resume.as_deref(), false)?;
+            (Some(child), client, incoming, stderr)
+        } else {
+            let connected =
+                PrimeClient::connect_daemon(&request.cwd, request.resume.as_deref()).await;
+            let (client, incoming) = match connected {
+                Ok(connected) => connected,
+                Err(HarnessError::Io(_)) => {
+                    // Prime's own CLI starts its configured daemon on first use.
+                    self.probe(Path::new(&request.cwd), "get_state").await?;
+                    PrimeClient::connect_daemon(&request.cwd, request.resume.as_deref()).await?
+                }
+                Err(error) => return Err(error),
+            };
+            (None, client, incoming, StderrTail::default())
+        };
         let (tx, rx) = mpsc::channel(256);
         tokio::spawn(session::run_session(
             child, client, incoming, stderr, request, controls, tx,

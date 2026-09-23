@@ -4,8 +4,8 @@ name: release
 #   - Linux headless tarballs (x86_64 + aarch64) via scripts/package-linux.sh
 #   - macOS dmg (Apple silicon) via scripts/package-macos.sh
 #   - Windows portable zip (x86_64) via scripts/package-windows.ps1
-# then create a release in this fork. JJzeron has no default update feed;
-# the upstream zeron.sh release bucket is never written by this workflow.
+# then create a release in this fork. The app checks this fork's GitHub Release
+# assets by default; the upstream zeron.sh release bucket is never written.
 #
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
@@ -141,7 +141,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.repository == 'lorianlee98-spec/JJzeron' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [cursor-compatibility, linux, macos, windows]
     runs-on: ubuntu-latest
     steps:

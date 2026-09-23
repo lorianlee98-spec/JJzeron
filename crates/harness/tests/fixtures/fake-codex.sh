@@ -71,23 +71,47 @@ fi
 
 # ---- first turn ------------------------------------------------------------
 read -r turnline || exit 1
-if has "$turnline" '"method":"thread/goal/get"'; then
-  if has "$thread_line" '"model":"goal-fixture"'; then
-    emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":{\"threadId\":\"th-1\",\"objective\":\"Ship capsule\",\"status\":\"active\",\"tokensUsed\":12}}}"
+while has "$turnline" '"method":"thread/goal/get"'; do
+  if has "$thread_line" '"model":"goal-complete-fixture"'; then
+    emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":{\"threadId\":\"th-1\",\"objective\":\"Finished goal\",\"status\":\"complete\",\"tokensUsed\":12}}}"
+  elif has "$thread_line" '"model":"goal-paused-fixture"'; then
+    emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":{\"threadId\":\"th-1\",\"objective\":\"Ship capsule\",\"status\":\"paused\",\"tokensUsed\":12}}}"
+  elif has "$thread_line" '"model":"goal-fixture"'; then
+    if has "$thread_line" '"method":"thread/resume"'; then
+      emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":{\"threadId\":\"th-resumed\",\"objective\":\"Ship capsule\",\"status\":\"paused\",\"tokensUsed\":12}}}"
+    else
+      emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":{\"threadId\":\"th-1\",\"objective\":\"Ship capsule\",\"status\":\"active\",\"tokensUsed\":12}}}"
+    fi
   else
     emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":null}}"
   fi
   read -r turnline || exit 1
-fi
+done
 tid=$(rid "$turnline")
 
 if has "$turnline" '"method":"thread/goal/clear"'; then
-  has "$turnline" '"threadId":"th-resumed"' || exit 1
+  if has "$turnline" '"threadId":"th-resumed"'; then
+    emit "{\"id\":$tid,\"result\":{\"cleared\":true}}"
+    exec sleep 30
+  fi
+  has "$thread_line" '"model":"goal-complete-fixture"' || exit 1
   emit "{\"id\":$tid,\"result\":{\"cleared\":true}}"
-  exec sleep 30
+  read -r turnline || exit 1
+  tid=$(rid "$turnline")
 fi
 
 if has "$turnline" '"method":"thread/goal/set"'; then
+  if has "$turnline" '"status":"active"' && ! has "$turnline" '"objective"'; then
+    emit "{\"id\":$tid,\"result\":{\"goal\":{\"threadId\":\"th-resumed\",\"objective\":\"Ship capsule\",\"status\":\"active\"}}}"
+    emit '{"method":"turn/started","params":{"threadId":"th-resumed","turn":{"id":"goal-resumed-turn"}}}'
+    emit '{"method":"turn/completed","params":{"threadId":"th-resumed","turn":{"id":"goal-resumed-turn","status":"completed"}}}'
+    exec sleep 30
+  fi
+  if has "$turnline" '"objective":"Edited goal"'; then
+    has "$turnline" '"status":"paused"' || exit 1
+    emit "{\"id\":$tid,\"result\":{\"goal\":{\"threadId\":\"th-1\",\"objective\":\"Edited goal\",\"status\":\"paused\",\"tokensUsed\":12}}}"
+    exec sleep 30
+  fi
   has "$turnline" '"objective":"Verify JJzeron goals"' || exit 1
   has "$turnline" '"tokenBudget":5000' || exit 1
   has "$turnline" '"status":"active"' || exit 1
@@ -95,6 +119,9 @@ if has "$turnline" '"method":"thread/goal/set"'; then
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"goal-turn"}}}'
   emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"goal-message","delta":"Goal work started"}}'
   emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"goal-turn","status":"completed"}}}'
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"goal-turn-2"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"goal-message-2","delta":"Goal work continued"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"goal-turn-2","status":"completed"}}}'
   exec sleep 30
 fi
 
@@ -114,6 +141,14 @@ if has "$turnline" '"method":"review/start"'; then
 fi
 
 case "$turnline" in
+*scenario:agent-goal*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-agent-goal\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-agent-goal"}}}'
+  emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","goal":{"threadId":"th-1","objective":"Agent-created goal","status":"active"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"agent-goal-message","delta":"Working toward agent goal"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-agent-goal","status":"completed"}}}'
+  exec sleep 30
+  ;;
 *scenario:steer-child*)
   emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
   emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'

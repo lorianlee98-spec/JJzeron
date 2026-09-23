@@ -28,7 +28,7 @@ jjzeron status      # local/synced mode and engine status
 jjzeron daemon start|stop|restart|status
 ```
 
-Updates require an explicit fork release feed via `ZERON_RELEASES_URL`. JJzeron never uses upstream Zeron's releases by default.
+Updates check [JJzeron's GitHub Releases](https://github.com/lorianlee98-spec/JJzeron/releases) by default, including in local mode. The macOS app can download and restart into a new release from its update notice. `ZERON_RELEASES_URL` overrides the default feed. To publish a new version, bump `Cargo.toml` and push the matching `v<version>` tag; GitHub Actions builds and publishes the packages.
 
 ## Optional multi-device sync
 

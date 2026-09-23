@@ -179,13 +179,33 @@ async fn goal_controls_keep_parent_and_child_turns_running() {
 #[tokio::test]
 async fn goal_command_keeps_native_auto_turn_active_until_it_finishes() {
     let (controls, steer, _token) = controls("Yes");
+    let mut stream = harness()
+        .run(
+            request("/goal --budget 5000 Verify JJzeron goals"),
+            controls,
+        )
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    let mut completed = 0;
+    while completed < 2 {
+        let event = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("native goal turn stalled")
+            .expect("native goal stream ended")
+            .unwrap();
+        if matches!(
+            event,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        ) {
+            completed += 1;
+        }
+        events.push(event);
+    }
     drop(steer);
-    let events = run_to_end(
-        &harness(),
-        request("/goal --budget 5000 Verify JJzeron goals"),
-        controls,
-    )
-    .await;
     assert!(events.iter().any(|event| matches!(event,
         AgentEvent::GoalUpdate { harness: HarnessId::Codex, goal: Some(goal) }
             if goal["objective"] == "Verify JJzeron goals"
@@ -215,6 +235,54 @@ async fn goal_command_keeps_native_auto_turn_active_until_it_finishes() {
         })
         .unwrap();
     assert!(goal < work && work < done);
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::TextDelta { text } if text == "Goal work continued"
+    )));
+    assert_eq!(completed, 2);
+}
+
+#[tokio::test]
+async fn agent_created_goal_emits_native_update_without_user_goal_command() {
+    let (controls, steer, _token) = controls("Yes");
+    drop(steer);
+    let events = run_to_end(&harness(), request("scenario:agent-goal"), controls).await;
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::GoalUpdate { harness: HarnessId::Codex, goal: Some(goal) }
+            if goal["objective"] == "Agent-created goal" && goal["status"] == "active"
+    )));
+}
+
+#[tokio::test]
+async fn goal_edit_preserves_paused_status_and_usage() {
+    let (controls, steer, _token) = controls("Edited goal");
+    drop(steer);
+    let mut req = request("/goal edit");
+    req.model = Some("goal-paused-fixture".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::GoalUpdate { harness: HarnessId::Codex, goal: Some(goal) }
+            if goal["objective"] == "Edited goal"
+                && goal["status"] == "paused"
+                && goal["tokensUsed"] == 12
+    )));
+    assert!(!events.iter().any(|event| matches!(event,
+        AgentEvent::GoalUpdate { goal: Some(goal), .. } if goal["objective"] == "edit"
+    )));
+}
+
+#[tokio::test]
+async fn new_goal_after_completion_clears_the_completed_goal_without_confirmation() {
+    let (controls, steer, _token) = controls("Keep current goal");
+    drop(steer);
+    let mut req = request("/goal --budget 5000 Verify JJzeron goals");
+    req.model = Some("goal-complete-fixture".into());
+    let events = run_to_end(&harness(), req, controls).await;
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::GoalUpdate { harness: HarnessId::Codex, goal: Some(goal) }
+            if goal["objective"] == "Verify JJzeron goals"
+                && goal["status"] == "active"
+                && goal["tokenBudget"] == 5000
+    )));
 }
 
 #[tokio::test]

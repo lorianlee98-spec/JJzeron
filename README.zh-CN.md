@@ -26,7 +26,7 @@ jjzeron status      # 查看本地/同步模式和引擎状态
 jjzeron daemon start|stop|restart|status
 ```
 
-更新需要显式配置 fork 的 `ZERON_RELEASES_URL`，默认不会读取原版 Zeron 的发布源。
+更新默认从 [JJzeron 的 GitHub Releases](https://github.com/lorianlee98-spec/JJzeron/releases) 检查，本地模式也会收到新版本提示。macOS App 可以从提示中下载并重启安装；`ZERON_RELEASES_URL` 可覆盖默认更新源。发布新版时，先更新 `Cargo.toml` 的版本，再推送同版本的 `v<版本>` 标签，GitHub Actions 会构建并发布安装包。
 
 ## 可选：多设备同步
 

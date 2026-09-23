@@ -890,6 +890,9 @@ fn command_request(
             let args = args.trim();
             match args {
                 "" | "status" => Ok(Some(("thread/goal/get", json!({"threadId": thread_id})))),
+                // Editing is a TUI action, not an objective named "edit". The
+                // app-server edit journey is completed in start_turn below.
+                "edit" => Ok(Some(("thread/goal/get", json!({"threadId": thread_id})))),
                 "pause" | "resume" => Ok(Some((
                     "thread/goal/set",
                     json!({"threadId": thread_id, "status": if args == "pause" { "paused" } else { "active" }}),
@@ -974,16 +977,21 @@ enum StartedCommand {
     Goal {
         goal: Option<Value>,
         starts_turn: bool,
+        message: Option<String>,
     },
 }
 
-async fn start_turn(client: &RpcClient, params: Value) -> Result<StartedCommand, HarnessError> {
+async fn start_turn(
+    client: &RpcClient,
+    params: Value,
+    request_input: &Arc<RequestInputFn>,
+) -> Result<StartedCommand, HarnessError> {
     let text = params
         .pointer("/input/0/text")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let thread_id = params["threadId"].as_str().unwrap_or_default();
-    let native = command_request(text, thread_id)?;
+    let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
+    let native = command_request(text, &thread_id)?;
     if native.is_some()
         && params["input"]
             .as_array()
@@ -993,7 +1001,85 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<StartedCommand,
             "Codex commands cannot include skill selections; send them in a separate prompt".into(),
         ));
     }
-    let (method, params) = native.unwrap_or(("turn/start", params));
+    let goal_edit =
+        zeron_proto::invocation::leading_command(&zeron_proto::invocation::invocation_prompt(text))
+            == Some(("goal", "edit"));
+    let (mut method, mut params) = native.unwrap_or(("turn/start", params));
+    let mut message = None;
+    if goal_edit || (method == "thread/goal/set" && params.get("objective").is_some()) {
+        let current = client
+            .request("thread/goal/get", json!({"threadId": thread_id}))
+            .await?;
+        let existing = current.get("goal").filter(|goal| goal.is_object()).cloned();
+        if goal_edit {
+            let Some(goal) = existing else {
+                return Err(HarnessError::Protocol("No goal to edit".into()));
+            };
+            let id = new_message_id();
+            let answers = (request_input)(vec![UserInputQuestion {
+                id: id.clone(),
+                header: "Edit goal".into(),
+                question: "Enter the new objective. Leave empty to keep the current goal.".into(),
+                options: vec!["Keep current goal".into()],
+                multi_select: false,
+            }])
+            .await
+            .unwrap_or_default();
+            let objective = answers
+                .iter()
+                .find(|answer| answer.question_id == id)
+                .and_then(|answer| answer.labels.first())
+                .map(|answer| answer.trim())
+                .filter(|answer| !answer.is_empty() && *answer != "Keep current goal");
+            let Some(objective) = objective else {
+                return Ok(StartedCommand::Goal {
+                    goal: Some(goal),
+                    starts_turn: false,
+                    message: Some("Goal unchanged.".into()),
+                });
+            };
+            let status = match goal["status"].as_str() {
+                Some("budgetLimited" | "complete") => "active",
+                Some(status @ ("active" | "paused" | "blocked" | "usageLimited")) => status,
+                _ => return Err(HarnessError::Protocol("Unknown Codex goal status".into())),
+            };
+            params = json!({
+                "threadId": thread_id,
+                "objective": objective,
+                "status": status,
+                "tokenBudget": goal["tokenBudget"],
+            });
+            method = "thread/goal/set";
+        } else if let Some(goal) = existing {
+            if goal["status"] != "complete" {
+                let id = new_message_id();
+                let answers = (request_input)(vec![UserInputQuestion {
+                    id: id.clone(),
+                    header: "Replace goal?".into(),
+                    question: "The current goal is unfinished. Replace it with the new objective?"
+                        .into(),
+                    options: vec!["Replace goal".into(), "Keep current goal".into()],
+                    multi_select: false,
+                }])
+                .await
+                .unwrap_or_default();
+                let replace = answers.iter().any(|answer| {
+                    answer.question_id == id
+                        && answer.labels.iter().any(|label| label == "Replace goal")
+                });
+                if !replace {
+                    return Ok(StartedCommand::Goal {
+                        goal: Some(goal),
+                        starts_turn: false,
+                        message: Some("Goal unchanged.".into()),
+                    });
+                }
+            }
+            client
+                .request("thread/goal/clear", json!({"threadId": thread_id}))
+                .await?;
+        }
+    }
     let goal_starts_turn = method == "thread/goal/set"
         && (params.get("objective").is_some() || params["status"] == "active");
     let started = client.request(method, params).await?;
@@ -1017,10 +1103,21 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<StartedCommand,
         _ => None,
     };
     if let Some(goal) = goal {
+        if method == "thread/goal/get" {
+            message = Some(match &goal {
+                Some(goal) => format!(
+                    "Goal {}: {}",
+                    goal["status"].as_str().unwrap_or("unknown"),
+                    goal["objective"].as_str().unwrap_or(""),
+                ),
+                None => "No goal set.".into(),
+            });
+        }
         Ok(StartedCommand::Goal {
             starts_turn: goal_starts_turn
                 && goal.as_ref().is_some_and(|goal| goal["status"] == "active"),
             goal,
+            message,
         })
     } else {
         Ok(StartedCommand::Turn(
@@ -1302,7 +1399,7 @@ async fn run_session(session: Session) {
 
     let mut router = TurnRouter::default();
     let (initial_done, initial_native) =
-        match start_turn(&client, turn_params(&request.prompt)).await {
+        match start_turn(&client, turn_params(&request.prompt), &request_input).await {
             Ok(StartedCommand::Turn(id)) => {
                 router.adopt_started(id);
                 (
@@ -1313,7 +1410,11 @@ async fn run_session(session: Session) {
                         .is_some(),
                 )
             }
-            Ok(StartedCommand::Goal { goal, starts_turn }) => {
+            Ok(StartedCommand::Goal {
+                goal,
+                starts_turn,
+                message,
+            }) => {
                 if !send(
                     &event_tx,
                     AgentEvent::GoalUpdate {
@@ -1322,6 +1423,12 @@ async fn run_session(session: Session) {
                     },
                 )
                 .await
+                {
+                    shutdown_child(&mut child, kill_grace).await;
+                    return;
+                }
+                if let Some(text) = message
+                    && !send(&event_tx, AgentEvent::TextDelta { text }).await
                 {
                     shutdown_child(&mut child, kill_grace).await;
                     return;
@@ -1438,7 +1545,15 @@ async fn run_session(session: Session) {
                     }
                     "turn/started" => {
                         nested_images.clear();
-                        router.note_started(turn_id(&params));
+                        let id = turn_id(&params);
+                        router.note_started(id.clone());
+                        if router.active.as_deref() == Some(id.as_str()) {
+                            done_current = false;
+                            if !send(&event_tx, AgentEvent::TurnStarted {
+                                harness: HarnessId::Codex,
+                                turn_id: id,
+                            }).await { break 'main; }
+                        }
                     }
 
                     "item/agentMessage/delta" => {
@@ -1594,7 +1709,7 @@ async fn run_session(session: Session) {
                         while let Some(text) = queued_steers.pop_front() {
                             current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                             if !steer_as_new_turn(
-                                &client,
+                                &client, &request_input,
                                 turn_params(&text),
                                 &mut router,
                                 &event_tx,
@@ -1780,7 +1895,7 @@ async fn run_session(session: Session) {
                                 } else {
                                     current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                                     if !steer_as_new_turn(
-                                        &client, turn_params(&text), &mut router, &event_tx,
+                                        &client, &request_input, turn_params(&text), &mut router, &event_tx,
                                         &mut assistant_message_id, &mut done_current, &mut current_native,
                                     ).await { break 'main; }
                                 }
@@ -1789,7 +1904,7 @@ async fn run_session(session: Session) {
                     } else {
                         current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                         if !steer_as_new_turn(
-                            &client, turn_params(&text), &mut router, &event_tx,
+                            &client, &request_input, turn_params(&text), &mut router, &event_tx,
                             &mut assistant_message_id, &mut done_current, &mut current_native,
                         ).await { break 'main; }
                     }
@@ -1886,6 +2001,7 @@ async fn run_session(session: Session) {
 /// when the loop should end (turn/start failed or the consumer hung up).
 async fn steer_as_new_turn(
     client: &RpcClient,
+    request_input: &Arc<RequestInputFn>,
     params: Value,
     router: &mut TurnRouter,
     event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
@@ -1894,7 +2010,7 @@ async fn steer_as_new_turn(
     current_native: &mut bool,
 ) -> bool {
     let thread_id = params["threadId"].as_str().map(str::to_owned);
-    match start_turn(client, params).await {
+    match start_turn(client, params, request_input).await {
         Ok(StartedCommand::Turn(id)) => {
             router.adopt_started(id);
             *done_current = false;
@@ -1908,7 +2024,11 @@ async fn steer_as_new_turn(
             )
             .await
         }
-        Ok(StartedCommand::Goal { goal, starts_turn }) => {
+        Ok(StartedCommand::Goal {
+            goal,
+            starts_turn,
+            message,
+        }) => {
             *done_current = !starts_turn;
             *current_native = false;
             let (prev, next) = rotate(assistant_message_id);
@@ -1928,6 +2048,10 @@ async fn steer_as_new_turn(
                     },
                 )
                 .await
+                && match message {
+                    Some(text) => send(event_tx, AgentEvent::TextDelta { text }).await,
+                    None => true,
+                }
                 && (starts_turn
                     || send(
                         event_tx,
@@ -1941,14 +2065,27 @@ async fn steer_as_new_turn(
                     .await)
         }
         Err(e) => {
-            let _ = send(
+            *done_current = true;
+            *current_native = false;
+            let (prev, next) = rotate(assistant_message_id);
+            send(
                 event_tx,
-                AgentEvent::Error {
-                    message: format!("Steering failed: {e}"),
+                AgentEvent::Steered {
+                    assistant_message_id: Some(prev),
+                    next_assistant_message_id: Some(next),
                 },
             )
-            .await;
-            false
+            .await
+                && send(
+                    event_tx,
+                    AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(e.to_string()),
+                        session_id: thread_id,
+                    },
+                )
+                .await
         }
     }
 }

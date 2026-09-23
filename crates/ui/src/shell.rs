@@ -8914,14 +8914,16 @@ impl Shell {
             .clone()
             .filter(|(harness, goal)| match harness {
                 zeron_proto::HarnessId::Prime => {
-                    goal["active"].as_bool() == Some(true) || goal["status"] == "paused"
+                    goal["objective"]
+                        .as_str()
+                        .is_some_and(|objective| !objective.is_empty())
+                        && !matches!(goal["status"].as_str(), Some("idle" | "cleared"))
                 }
-                zeron_proto::HarnessId::Codex => {
-                    !matches!(goal["status"].as_str(), None | Some("complete"))
-                }
+                zeron_proto::HarnessId::Codex => goal["status"].is_string(),
                 _ => false,
             });
-        if !agents.is_empty() || !commands.is_empty() || goal.is_some() {
+        let prime_background = state.prime_background;
+        if !agents.is_empty() || !commands.is_empty() || prime_background || goal.is_some() {
             let mut capsules = strip;
             if !commands.is_empty() {
                 let menu = popover::popover_card(&theme)
@@ -8940,10 +8942,36 @@ impl Shell {
                     cx,
                 ));
             }
+            if prime_background {
+                let menu = popover::popover_card(&theme)
+                    .w(px(320.0))
+                    .child(popover::menu_heading(&theme, "Prime background work"))
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .child("Prime has background work in progress."),
+                    );
+                capsules = capsules.child(self.activity_capsule(
+                    &chat_id,
+                    "prime-background",
+                    "Background work".into(),
+                    menu.into_any_element(),
+                    cx,
+                ));
+            }
             if !agents.is_empty() {
                 let mut menu = popover::popover_card(&theme)
                     .w(px(340.0))
-                    .child(popover::menu_heading(&theme, "Subagents"));
+                    .flex()
+                    .flex_col()
+                    .child(popover::menu_heading(&theme, "Subagents").flex_none());
+                let mut list = div()
+                    .id("activity-agents-list")
+                    .max_h(px(240.0))
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll();
                 for (doc_id, title, tail) in &agents {
                     let (chat, doc, title) = (chat_id.clone(), doc_id.clone(), title.clone());
                     let row_title = title.clone();
@@ -8965,7 +8993,7 @@ impl Shell {
                                         .unwrap_or_else(|| "Running".into()),
                                 ),
                         );
-                    menu = menu.child(self.activity_button(
+                    list = list.child(self.activity_button(
                         format!("activity-agent-{doc}"),
                         row,
                         move |this, cx| {
@@ -8981,6 +9009,7 @@ impl Shell {
                         cx,
                     ));
                 }
+                menu = menu.child(list);
                 capsules = capsules.child(self.activity_capsule(
                     &chat_id,
                     "agents",
@@ -8995,14 +9024,22 @@ impl Shell {
                     "paused" => ("Goal paused", "Paused"),
                     "blocked" => ("Goal blocked", "Blocked"),
                     "usageLimited" => ("Goal usage limit", "Usage limit reached"),
-                    "budgetLimited" | "budget_limited" => ("Goal budget reached", "Budget reached"),
+                    "budgetLimited" | "budget_limited" | "budget-limited" => {
+                        ("Goal budget reached", "Budget reached")
+                    }
+                    "errored" => ("Goal error", "Error"),
+                    "complete" | "completed" => ("Goal complete", "Complete"),
                     _ => ("Goal active", "Active"),
                 };
                 let mut menu = popover::popover_card(&theme)
                     .w(px(340.0))
+                    .flex()
+                    .flex_col()
                     .child(popover::menu_heading(&theme, "Goal"))
                     .child(
                         div()
+                            .max_h(px(120.0))
+                            .overflow_hidden()
                             .px(px(10.0))
                             .py(px(6.0))
                             .child(goal["objective"].as_str().unwrap_or("").to_owned()),
@@ -9014,9 +9051,12 @@ impl Shell {
                             .child(status_label),
                     );
                 let actions = match status {
-                    "active" => vec![("pause", "Pause"), ("clear", "Stop goal")],
-                    "paused" => vec![("resume", "Resume"), ("clear", "Stop goal")],
-                    _ => vec![("clear", "Stop goal")],
+                    "active" => vec![("pause", "Pause"), ("clear", "Clear goal")],
+                    "paused" => vec![("resume", "Resume"), ("clear", "Clear goal")],
+                    "blocked" | "usageLimited" if harness == zeron_proto::HarnessId::Codex => {
+                        vec![("resume", "Resume"), ("clear", "Clear goal")]
+                    }
+                    _ => vec![("clear", "Clear goal")],
                 };
                 for (action, label) in actions {
                     let chat = chat_id.clone();

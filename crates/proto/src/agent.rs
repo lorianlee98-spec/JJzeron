@@ -308,6 +308,15 @@ pub struct ToolDiff {
     pub new_text: String,
 }
 
+/// Per-file line counts from a tool's native patch or inline diff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDiffStat {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQuestion {
@@ -350,6 +359,13 @@ pub enum AgentEvent {
         /// Harness-native session id (used for resume).
         session_id: String,
         assistant_message_id: String,
+    },
+    /// A harness-native turn began without a new user prompt (for example a
+    /// Codex goal continuation). This is a lifecycle boundary, not content.
+    #[serde(rename_all = "camelCase")]
+    TurnStarted {
+        harness: HarnessId,
+        turn_id: String,
     },
     TextDelta {
         text: String,
@@ -394,6 +410,12 @@ pub enum AgentEvent {
         /// Inline file diff for edit-shaped tools (ACP `Diff` content).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
+    },
+    /// Patch stats for a resolved tool when the harness provides a patch
+    /// without the old/new file contents (Codex fileChange).
+    ToolDiffStats {
+        id: String,
+        stats: Vec<ToolDiffStat>,
     },
     /// Latest context occupancy, independent of cumulative billing usage.
     /// Missing fields preserve the previous measurement; zero tokens is valid.

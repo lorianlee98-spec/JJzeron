@@ -12,20 +12,19 @@ use tokio::sync::{mpsc, oneshot};
 use crate::HarnessError;
 use crate::process::{ChildStdin, ChildStdout};
 
+use super::daemon::DaemonClient;
+
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>>;
 
 #[derive(Clone)]
-pub(super) struct PrimeClient {
+pub(super) struct RpcClient {
     next_id: Arc<AtomicU64>,
     pending: Pending,
     writer: mpsc::UnboundedSender<Value>,
 }
 
-impl PrimeClient {
-    pub(super) fn new(
-        stdin: ChildStdin,
-        stdout: ChildStdout,
-    ) -> (Self, mpsc::UnboundedReceiver<Value>) {
+impl RpcClient {
+    fn new(stdin: ChildStdin, stdout: ChildStdout) -> (Self, mpsc::UnboundedReceiver<Value>) {
         let (writer, mut outgoing) = mpsc::unbounded_channel::<Value>();
         // ponytail: this queue is unbounded so events cannot block RPC
         // responses; split the lanes if sustained output becomes a memory cost.
@@ -99,11 +98,7 @@ impl PrimeClient {
         )
     }
 
-    pub(super) async fn request(
-        &self,
-        kind: &str,
-        mut fields: Value,
-    ) -> Result<Value, HarnessError> {
+    async fn request(&self, kind: &str, mut fields: Value) -> Result<Value, HarnessError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let object = fields.as_object_mut().ok_or_else(|| {
             HarnessError::Protocol("Prime RPC request fields must be an object".into())
@@ -127,9 +122,51 @@ impl PrimeClient {
         }
     }
 
-    pub(super) fn send(&self, value: Value) -> Result<(), HarnessError> {
+    fn send(&self, value: Value) -> Result<(), HarnessError> {
         self.writer
             .send(value)
             .map_err(|_| HarnessError::Protocol("Prime RPC stdin closed".into()))
+    }
+}
+
+#[derive(Clone)]
+pub(super) enum PrimeClient {
+    Rpc(RpcClient),
+    Daemon(DaemonClient),
+}
+
+impl PrimeClient {
+    pub(super) fn new(
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+    ) -> (Self, mpsc::UnboundedReceiver<Value>) {
+        let (client, incoming) = RpcClient::new(stdin, stdout);
+        (Self::Rpc(client), incoming)
+    }
+
+    pub(super) async fn connect_daemon(
+        cwd: &str,
+        resume: Option<&str>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<Value>), HarnessError> {
+        let (client, incoming) = DaemonClient::connect(cwd, resume).await?;
+        Ok((Self::Daemon(client), incoming))
+    }
+
+    pub(super) fn is_daemon(&self) -> bool {
+        matches!(self, Self::Daemon(_))
+    }
+
+    pub(super) async fn request(&self, kind: &str, fields: Value) -> Result<Value, HarnessError> {
+        match self {
+            Self::Rpc(client) => client.request(kind, fields).await,
+            Self::Daemon(client) => client.request(kind, fields).await,
+        }
+    }
+
+    pub(super) fn send(&self, value: Value) -> Result<(), HarnessError> {
+        match self {
+            Self::Rpc(client) => client.send(value),
+            Self::Daemon(client) => client.send(value),
+        }
     }
 }

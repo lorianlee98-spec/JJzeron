@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use zeron_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion};
 
+pub use zeron_proto::ToolDiffStat;
+
 use crate::constants::MSG_INLINE_MAX;
 
 /// Char cap for the tool-output SUMMARY persisted into the doc: first
@@ -63,18 +65,6 @@ pub fn summarize_tool_output(text: &str) -> Option<String> {
     let mut out = line[..end].to_owned();
     out.push('…');
     Some(out)
-}
-
-/// Per-file diff stats persisted in place of inline diff text (t3's shape).
-/// The inline diff was the bigger bomb than outputs — 32KB/edit, unexercised
-/// only because the claude harness emits none. Full diff text lives in the
-/// sidecar behind `diff_ref`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolDiffStat {
-    pub path: String,
-    pub additions: u64,
-    pub deletions: u64,
 }
 
 /// Line-level add/delete counts for one file's diff.
@@ -376,6 +366,19 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 }
             }
         }
+        AgentEvent::ToolDiffStats { id, stats } => {
+            for part in out.iter_mut() {
+                if let MessagePart::Tool {
+                    id: part_id,
+                    diff_stats,
+                    ..
+                } = part
+                    && part_id == id
+                {
+                    *diff_stats = Some(stats.clone());
+                }
+            }
+        }
         AgentEvent::InputRequested {
             request_id,
             questions,
@@ -476,6 +479,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // the transcript. UserMessage becomes its own doc ENTRY (the engine's
         // subagent sink writes it), never a part of the assistant message.
         AgentEvent::AssistantMessageCompleted { .. }
+        | AgentEvent::TurnStarted { .. }
         | AgentEvent::InlineImage { .. }
         | AgentEvent::Usage { .. }
         | AgentEvent::PrimeEvent { .. }
@@ -1098,6 +1102,47 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn fold_persists_native_file_change_stats_after_result() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "edit-1".into(),
+                call: ToolCall::EditFile {
+                    path: "/work/mod.rs".into(),
+                    old_string: None,
+                    new_string: None,
+                },
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "edit-1".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolDiffStats {
+                id: "edit-1".into(),
+                stats: vec![ToolDiffStat {
+                    path: "/work/mod.rs".into(),
+                    additions: 2,
+                    deletions: 1,
+                }],
+            },
+        );
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Tool { diff_stats: Some(stats), .. }
+                if stats.len() == 1 && (stats[0].additions, stats[0].deletions) == (2, 1)
+        ));
     }
 
     #[test]

@@ -8,8 +8,8 @@ Run `scripts/package-linux.sh` (or `PROFILE=debug scripts/package-linux.sh` for 
 
 ## macOS
 
-Run `scripts/package-macos.sh`. It writes `jjzeron-<version>-macos-<arch>.dmg` and `jjzeron-<version>-macos-<arch>-app.tar.gz`, both containing `JJzeron.app` with bundle ID `sh.jjzeron.app` and executable `jjzeron`. Set `CODESIGN_IDENTITY` and the notarization variables described in the script for a distributable signed build.
+Run `scripts/package-macos.sh`. It writes `jjzeron-<version>-macos-<arch>.dmg` and `jjzeron-<version>-macos-<arch>-app.tar.gz`, both containing `JJzeron.app` with bundle ID `sh.jjzeron.app` and executable `jjzeron`. Set `CODESIGN_IDENTITY` and the notarization variables described in the script for a distributable signed build. The app checks this fork's GitHub Releases for updates by default, including in local mode.
 
 ## Windows
 
-Run `scripts/package-windows.ps1 -ReleasesUrl <your fork release feed>`. It packages `jjzeron.exe` with `jjzeron-update.json`. The update feed must be explicit; the fork never downloads original Zeron releases by default.
+Run `scripts/package-windows.ps1 -ReleasesUrl https://github.com/lorianlee98-spec/JJzeron/releases/latest/download`. It packages `jjzeron.exe` with `jjzeron-update.json`. The fork never downloads original Zeron releases by default.

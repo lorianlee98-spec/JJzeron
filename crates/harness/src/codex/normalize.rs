@@ -6,7 +6,7 @@
 //! types) are accepted, and unknown item types map to nothing.
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall};
+use zeron_proto::{AgentEvent, DoneStatus, TodoItem, ToolCall, ToolDiffStat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -201,6 +201,30 @@ fn file_change_call(changes: &[(String, String)]) -> ToolCall {
     }
 }
 
+/// Codex's `FileUpdateChange.diff` is a unified patch for this one item.
+/// Count changed lines without persisting the potentially large patch text.
+fn file_change_stat(change: &Value) -> Option<ToolDiffStat> {
+    let path = change.get("path")?.as_str()?.to_owned();
+    let patch = change.get("diff")?.as_str()?;
+    let mut additions = 0;
+    let mut deletions = 0;
+    let mut in_hunk = false;
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            in_hunk = true;
+        } else if line.starts_with('+') && (in_hunk || !line.starts_with("+++ ")) {
+            additions += 1;
+        } else if line.starts_with('-') && (in_hunk || !line.starts_with("--- ")) {
+            deletions += 1;
+        }
+    }
+    (additions > 0 || deletions > 0).then_some(ToolDiffStat {
+        path,
+        additions,
+        deletions,
+    })
+}
+
 pub(crate) fn item_type(item: &Value) -> &str {
     item.get("type").and_then(Value::as_str).unwrap_or("")
 }
@@ -321,28 +345,36 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
             }
         },
         "fileChange" | "file_change" => {
-            let changes: Vec<(String, String)> = item
+            let native_changes = item
                 .get("changes")
                 .and_then(Value::as_array)
                 .map(|a| a.as_slice())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            let changes: Vec<(String, String)> = native_changes
                 .iter()
                 .map(|c| {
                     // Unknown kinds degrade to "update", like codex.ts.
                     let kind = c
                         .get("kind")
-                        .and_then(Value::as_str)
+                        .and_then(|kind| kind.as_str().or_else(|| kind.get("type")?.as_str()))
                         .filter(|k| matches!(*k, "add" | "delete" | "update"))
                         .unwrap_or("update");
                     (str_field(c, &["path"]), kind.to_owned())
                 })
                 .collect();
-            tool_lifecycle(
+            let mut events = tool_lifecycle(
                 phase,
-                id,
+                id.clone(),
                 file_change_call(&changes),
                 status == "failed" || status == "declined",
-            )
+            );
+            if phase == Phase::Completed && status != "failed" && status != "declined" {
+                let stats: Vec<_> = native_changes.iter().filter_map(file_change_stat).collect();
+                if !stats.is_empty() {
+                    events.push(AgentEvent::ToolDiffStats { id, stats });
+                }
+            }
+            events
         }
         "mcpToolCall" | "mcp_tool_call" => match phase {
             Phase::Started => {
@@ -821,7 +853,7 @@ mod tests {
     fn file_change_variants_map_to_typed_calls() {
         let add = map_item(
             Phase::Started,
-            &json!({"type": "fileChange", "id": "f1", "changes": [{"path": "/a.rs", "kind": "add"}]}),
+            &json!({"type": "fileChange", "id": "f1", "changes": [{"path": "/a.rs", "kind": {"type": "add"}}]}),
         );
         assert_eq!(
             add,
@@ -868,6 +900,41 @@ mod tests {
                 id: "f3".into(),
                 call: ToolCall::ApplyPatch { path: None },
             }]
+        );
+
+        let patched = map_item(
+            Phase::Completed,
+            &json!({"type": "fileChange", "id": "f4", "status": "completed", "changes": [{
+                "path": "/work/mod.rs", "kind": {"type": "update"},
+                "diff": "--- a/mod.rs\n+++ b/mod.rs\n@@ -1,2 +1,4 @@\n-old\n+new\n+extra\n+++ value\n keep\n"
+            }]}),
+        );
+        assert_eq!(
+            patched,
+            vec![
+                AgentEvent::ToolCall {
+                    id: "f4".into(),
+                    call: ToolCall::EditFile {
+                        path: "/work/mod.rs".into(),
+                        old_string: None,
+                        new_string: None,
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: "f4".into(),
+                    is_error: false,
+                    output: None,
+                    diff: None,
+                },
+                AgentEvent::ToolDiffStats {
+                    id: "f4".into(),
+                    stats: vec![ToolDiffStat {
+                        path: "/work/mod.rs".into(),
+                        additions: 3,
+                        deletions: 1,
+                    }],
+                },
+            ]
         );
     }
 
