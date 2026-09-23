@@ -16,6 +16,8 @@ pub enum HarnessId {
     Hermes,
     /// The pi coding agent (pi.dev), driven over ACP via the `pi-acp` adapter.
     Pi,
+    /// Prime Agent, driven over its native JSON-RPC protocol.
+    Prime,
     /// SST's opencode agent, driven natively over its own HTTP/SSE server
     /// protocol (`opencode serve` — the same wire the opencode desktop app
     /// speaks).
@@ -360,6 +362,14 @@ pub enum AgentEvent {
         name: String,
         mime_type: String,
     },
+    /// Harness-to-engine only. The engine imports these bytes and replaces the
+    /// event with GeneratedImage before any journal, document, or RPC publish.
+    #[serde(rename_all = "camelCase")]
+    InlineImage {
+        id: String,
+        data: String,
+        mime_type: String,
+    },
     ReasoningDelta {
         text: String,
     },
@@ -397,6 +407,18 @@ pub enum AgentEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+    },
+    /// Prime's JSONL RPC notification with image payload bytes omitted.
+    /// Subscribers can inspect native events that are not mapped into
+    /// transcript parts, and reconnecting subscribers can replay by seq.
+    PrimeEvent {
+        event: serde_json::Value,
+    },
+    /// Native goal state from a harness. None means the goal was cleared.
+    #[serde(rename_all = "camelCase")]
+    GoalUpdate {
+        harness: HarnessId,
+        goal: Option<serde_json::Value>,
     },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
@@ -576,6 +598,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&HarnessId::ClaudeCode).unwrap(),
             "\"claude-code\""
+        );
+        assert_eq!(
+            serde_json::to_string(&HarnessId::Prime).unwrap(),
+            "\"prime\""
+        );
+        assert_eq!(
+            serde_json::from_str::<HarnessId>("\"prime\"").unwrap(),
+            HarnessId::Prime
         );
     }
 }

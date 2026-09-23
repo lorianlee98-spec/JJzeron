@@ -18,6 +18,9 @@ pinned Antigravity archive.
 | [Devin](https://cli.devin.ai/) | macOS, when brew resolves: `brew install --cask devin-cli`; otherwise `curl -fsSL https://cli.devin.ai/install.sh \| bash` | `irm https://static.devin.ai/cli/setup.ps1 \| iex` |
 | Antigravity | Existing verified 1.1.1 archive in `acp::antigravity_archive`; no shell command | Same archive path on supported architectures |
 
+Prime Agent uses the locally installed `prime-agent` CLI over native RPC. Zeron
+detects it on PATH or through `PRIME_AGENT_EXECUTABLE` and offers no installer.
+
 Unix shell commands run through `sh -c`, with PATH augmented from the user's login
 shell and npm toolchain. Native Windows `irm` commands run through
 `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command`.

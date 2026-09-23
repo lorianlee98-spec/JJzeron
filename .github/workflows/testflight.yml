@@ -76,10 +76,10 @@ jobs:
           }
 
           apps="$RUNNER_TEMP/apps.json"
-          api 'https://api.appstoreconnect.apple.com/v1/apps?filter[bundleId]=sh.zeron.ios&fields[apps]=name,bundleId&limit=10' > "$apps"
+          api 'https://api.appstoreconnect.apple.com/v1/apps?filter[bundleId]=sh.jjzeron.ios&fields[apps]=name,bundleId&limit=10' > "$apps"
           app_count="$(jq '.data | length' "$apps")"
           if [ "$app_count" -ne 1 ]; then
-            echo "Expected exactly one App Store Connect app for sh.zeron.ios; found $app_count." >&2
+            echo "Expected exactly one App Store Connect app for sh.jjzeron.ios; found $app_count." >&2
             exit 3
           fi
           app_id="$(jq -r '.data[0].id' "$apps")"

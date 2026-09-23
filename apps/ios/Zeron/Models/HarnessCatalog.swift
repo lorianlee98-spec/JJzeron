@@ -68,6 +68,7 @@ enum HarnessCatalog {
         "grok": "Grok",
         "hermes": "Hermes",
         "pi": "Pi",
+        "prime": "Prime Agent",
         "cursor": "Cursor",
         "opencode": "OpenCode",
         "antigravity": "Antigravity",
@@ -119,6 +120,12 @@ enum HarnessCatalog {
                 ModelInfo(id: "default", label: "pi default",
                           description: "Runs the model configured in pi (`pi` settings)",
                           reasoningLevels: ["minimal", "low", "medium", "high", "xhigh", "max"]),
+            ]
+        case "prime":
+            return [
+                ModelInfo(id: "default", label: "Prime default",
+                          description: "Runs the model configured in Prime Agent",
+                          reasoningLevels: []),
             ]
         case "opencode":
             // Static fallback only — a reachable host answers `listModels`
@@ -278,7 +285,7 @@ enum HarnessCatalog {
         let ids = models.map(\.id)
         let hasReal = ids.contains(where: { $0.lowercased() != "default" })
         return models.compactMap { row in
-            if hasReal && row.id.lowercased() == "default" {
+            if hasReal && harness != "prime" && row.id.lowercased() == "default" {
                 return nil
             }
             var id = row.id

@@ -170,8 +170,8 @@ impl RunJournal {
         Ok(read_lines(&path)?.into_iter().next_back())
     }
 
-    /// Crash-recovery scan: chat ids whose journal's last event is NOT a `Done` — their
-    /// runs died mid-stream and need recovery (stamp `aborted`, close the journal).
+    /// Crash-recovery scan: chat ids whose last turn event is not `Done`.
+    /// Prime can send protocol notifications after a completed turn.
     pub fn stale_sessions(&self) -> Result<Vec<String>, JournalError> {
         let mut stale = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
@@ -183,7 +183,12 @@ impl RunJournal {
             let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let last = read_lines(&path)?.into_iter().next_back();
+            let last = read_lines(&path)?.into_iter().rev().find(|(_, event)| {
+                !matches!(
+                    event,
+                    AgentEvent::PrimeEvent { .. } | AgentEvent::GoalUpdate { .. }
+                )
+            });
             match last {
                 Some((_, AgentEvent::Done { .. })) | None => {}
                 Some(_) => stale.push(chat_id.to_string()),
@@ -324,6 +329,24 @@ mod tests {
         assert_eq!(journal.stale_sessions().unwrap(), vec!["dead".to_string()]);
         // Closing the stale journal with a Done clears the flag.
         journal.append("dead", &done()).unwrap();
+        assert!(journal.stale_sessions().unwrap().is_empty());
+        journal
+            .append(
+                "clean",
+                &AgentEvent::PrimeEvent {
+                    event: serde_json::json!({"type": "session_action_update"}),
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                "clean",
+                &AgentEvent::GoalUpdate {
+                    harness: zeron_proto::HarnessId::Codex,
+                    goal: Some(serde_json::json!({ "status": "paused" })),
+                },
+            )
+            .unwrap();
         assert!(journal.stale_sessions().unwrap().is_empty());
     }
 

@@ -39,7 +39,7 @@ enum DocDisk {
         }
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
                                             in: .userDomainMask)[0]
-            .appendingPathComponent("ZeronDocs", isDirectory: true)
+            .appendingPathComponent("JJzeronDocs", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }

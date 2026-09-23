@@ -1,4 +1,4 @@
-# Zeron for iOS
+# JJzeron for iOS
 
 A native SwiftUI viewport onto the zeron mesh. The phone is a **peer
 device**: it joins the same Loro CRDT rooms as every other device (workspace

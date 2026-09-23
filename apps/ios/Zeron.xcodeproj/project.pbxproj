@@ -68,7 +68,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXFileReference section */
-		A1000000000000000000PR01 /* Zeron.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zeron.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1000000000000000000PR01 /* JJzeron.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JJzeron.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000PR01 /* ZeronTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3000000000000000000PR01 /* ZeronUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -104,7 +104,7 @@
 		A1000000000000000000G002 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A1000000000000000000PR01 /* Zeron.app */,
+				A1000000000000000000PR01 /* JJzeron.app */,
 				A2000000000000000000PR01 /* ZeronTests.xctest */,
 				A3000000000000000000PR01 /* ZeronUITests.xctest */,
 			);
@@ -135,7 +135,7 @@
 				A1000000000000000000P004 /* Markdown */,
 			);
 			productName = Zeron;
-			productReference = A1000000000000000000PR01 /* Zeron.app */;
+			productReference = A1000000000000000000PR01 /* JJzeron.app */;
 			productType = "com.apple.product-type.application";
 		};
 		A2000000000000000000T001 /* ZeronTests */ = {
@@ -321,8 +321,8 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = sh.jjzeron.ios;
+				PRODUCT_NAME = JJzeron;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -347,8 +347,8 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = sh.jjzeron.ios;
+				PRODUCT_NAME = JJzeron;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -365,13 +365,13 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.jjzeron.ios.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Zeron.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Zeron";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/JJzeron.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/JJzeron";
 			};
 			name = Debug;
 		};
@@ -383,7 +383,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.jjzeron.ios.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -401,13 +401,13 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.jjzeron.ios.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Zeron.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Zeron";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/JJzeron.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/JJzeron";
 			};
 			name = Release;
 		};
@@ -419,7 +419,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = sh.zeron.ios.uitests;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.jjzeron.ios.uitests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;

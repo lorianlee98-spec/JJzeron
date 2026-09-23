@@ -2156,7 +2156,7 @@ fn format_kb(bytes: u64) -> String {
 
 /// Rotating flavour vocabulary (21 words / 7s, seeded per chat).
 pub const FLAVOUR_WORDS: [&str; 21] = [
-    "Zeroning",
+    "Working",
     "Thinking",
     "Pondering",
     "Scheming",
@@ -5724,10 +5724,10 @@ impl Transcript {
         let theme = Theme::of(cx).clone();
         let frame = div()
             .id(SharedString::from(format!("{row_id}-generated")))
-            .w(px(512.0))
+            .w(px(320.0))
             .max_w_full()
-            .h(px(320.0))
-            .max_h(px(420.0))
+            .h(px(220.0))
+            .max_h(px(240.0))
             .flex()
             .items_center()
             .justify_center()
@@ -5737,9 +5737,9 @@ impl Transcript {
         match state {
             AttachmentSnapshot::Loaded(loaded) => {
                 let dimensions =
-                    crate::appshots::png_dimensions(&loaded.image.bytes).unwrap_or((512, 320));
-                let scale = (512.0 / dimensions.0 as f32)
-                    .min(420.0 / dimensions.1 as f32)
+                    crate::appshots::png_dimensions(&loaded.image.bytes).unwrap_or((320, 220));
+                let scale = (320.0 / dimensions.0 as f32)
+                    .min(240.0 / dimensions.1 as f32)
                     .min(1.0);
                 let preview =
                     crate::attachments::PreviewImage::new(name.to_owned(), loaded.image.clone());
@@ -5747,7 +5747,7 @@ impl Transcript {
                     .w(px(dimensions.0 as f32 * scale))
                     .h(px(dimensions.1 as f32 * scale))
                     .role(gpui::Role::Button)
-                    .aria_label("Preview generated image")
+                    .aria_label("Preview image")
                     .tab_index(0)
                     .cursor_pointer()
                     .focus_visible(move |style| style.border_2().border_color(theme.accent))
@@ -5769,11 +5769,11 @@ impl Transcript {
             }
             AttachmentSnapshot::Loading => frame
                 .text_color(theme.text_muted)
-                .child("Loading generated image…")
+                .child("Loading image…")
                 .into_any_element(),
             AttachmentSnapshot::Error { .. } => frame
                 .text_color(theme.text_muted)
-                .child("Generated image unavailable")
+                .child("Image unavailable")
                 .into_any_element(),
         }
     }
@@ -8283,7 +8283,7 @@ fn strip_spawn_prefix(text: &str) -> &str {
 /// a fixed-width tab spent on "Agent: " never shows the task, so the genus
 /// is stripped here and the call input's description/prompt fields back up
 /// a bare name (older docs); "Subagent" only as the last resort.
-fn subagent_tab_title(call: &ToolCall) -> SharedString {
+pub(crate) fn subagent_tab_title(call: &ToolCall) -> SharedString {
     let (name, input) = match call {
         ToolCall::Unknown { name, input } => (name.as_str(), input.as_ref()),
         ToolCall::Mcp { tool, input, .. } => (tool.as_str(), input.as_ref()),

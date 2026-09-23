@@ -16,7 +16,7 @@
 //! Revalidate the shim against the typings on every bump.
 //!
 //! - The shim is materialized into the SDK's managed npm install
-//!   (`~/.zeron/adapters/…`, [`crate::adapter_install::ensure_installed_shim`])
+//!   (`~/.jjzeron/adapters/…`, [`crate::adapter_install::ensure_installed_shim`])
 //!   and spawned as `node <shim>`.
 //! - Done = the SDK run's terminal result (`turn` frame off `run.wait()` /
 //!   `turn-ended`) — a crisp turn end by construction.

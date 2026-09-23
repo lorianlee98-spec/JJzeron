@@ -2,7 +2,8 @@
 //!
 //! NATIVE DRIVERS speak each agent's own wire directly: Claude Code over
 //! stream-json ([`ClaudeHarness`]), Codex over the app-server JSON-RPC
-//! ([`CodexHarness`]), Cursor through a pinned @cursor/sdk shim
+//! ([`CodexHarness`]), Prime Agent over native JSONL RPC ([`PrimeHarness`]),
+//! Cursor through a pinned @cursor/sdk shim
 //! ([`CursorHarness`]), and opencode over its own HTTP/SSE server protocol
 //! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
 //! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
@@ -171,7 +172,10 @@ pub(crate) mod jsonrpc;
 pub mod mock;
 mod model_context;
 pub mod opencode;
+pub mod prime;
 pub mod process;
+mod tool_images;
+pub use prime::PrimeHarness;
 mod scratch;
 pub mod shell_env;
 pub(crate) mod skills;

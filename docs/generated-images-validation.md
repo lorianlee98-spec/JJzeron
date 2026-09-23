@@ -1,9 +1,20 @@
-# Generated images in conversation threads
+# Images in conversation threads
 
 Codex `imageGeneration` uses `savedPath` as its only source. The engine imports a
 PNG, JPEG, WebP, or GIF of at most 24 MiB into the active profile's uploads root
 before publishing the event. Neither the original path nor `result` enters the
 journal or session document. Source files remain owned by Codex.
+
+Codex MCP and dynamic tool image blocks, Codex programmatic tool output images,
+and Prime RPC tool result images enter the same profile uploads store. Codex's
+typed app-server items omit programmatic outputs, so that adapter follows only
+new `custom_tool_call_output` and `function_call_output` records in the native rollout file; this also
+works after `thread/resume`. The engine validates decoded size and raster
+signature, then replaces inline media with the same durable image metadata
+used for generated images. Prime's subscribed native events retain their shape
+but omit image `data`; neither provider's Base64 enters the Zeron journal or
+session document. Identical Codex images forwarded from a nested MCP call to
+its outer programmatic result display once.
 
 The transcript reads through the existing attachment RPC/cache. It tries the
 message's device first, then the chat host and local device, without duplicate
@@ -65,14 +76,16 @@ implementation's automated tests.
 
 Run a normal Codex chat in both light and dark themes, including a narrow window:
 
-1. Generate a goblin PNG. Check the live chip, resolved chip, inline image,
-   rounded corners, contained aspect ratio, and lightbox click/Escape focus.
-2. Generate two images with text before and after. Check order, spacing and
+1. Generate a goblin PNG. Check the live chip, resolved chip, compact inline
+   image, rounded corners, contained aspect ratio, and lightbox click/Escape focus.
+2. Return an image from a Codex tool and a Prime tool. Check that each appears
+   once, opens in the lightbox, and survives changing chat and app restart.
+3. Generate two images with text before and after. Check order, spacing and
    timestamp placement. Small images should keep their natural size.
-3. Change chat and return, then restart. The durable image should reappear.
-4. Open the thread on another client. Disconnect the owning host and check
+4. Change chat and return, then restart. The durable image should reappear.
+5. Open the thread on another client. Disconnect the owning host and check
    the unavailable placeholder without affecting other message parts.
-5. Exercise the fake provider's quota-error and missing-path scenarios. Neither
+6. Exercise the fake provider's quota-error and missing-path scenarios. Neither
    should leave an unresolved chip or produce an empty image part.
 
 For the generated turn, inspect the profile journal/document for the uploads

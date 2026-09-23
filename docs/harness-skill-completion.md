@@ -37,6 +37,7 @@ Typing an unselected inline `/word` does not execute a local action.
 | Claude Code | Project-scoped commands from its initialize catalog |
 | OpenCode | Project-scoped server command catalog |
 | Devin, Grok, Hermes, Pi, Antigravity | Advertised ACP commands, including session command updates |
+| Prime Agent | Native RPC `get_commands`, including extensions and skills |
 | Cursor | Workspace actions; its SDK adapter has no native command catalog |
 
 This does not imply that every command in a provider's terminal UI can execute
@@ -74,6 +75,8 @@ Shared `.agents/skills` files use explicit file delivery in Claude and generic A
 catalogs: a matching built-in command name does not establish skill identity.
 Pi's `skill:` namespace and OpenCode's skill source metadata identify native skills
 explicitly and remain eligible for native delivery.
+Prime Agent uses its own RPC `get_commands` catalog in the project directory, so
+its configured skill and extension paths remain owned by the local CLI.
 
 At delivery, Codex receives typed skill inputs. A leading skill selection with a
 native command for the current harness becomes that command, preserving its

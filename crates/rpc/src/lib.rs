@@ -59,6 +59,15 @@ pub mod methods {
     /// per pending command. Params `{chatId}`; IPC-only.
     pub const RETRY_DELIVERY: &str = "RetryDelivery";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
+    /// `{chatId, afterSeq?}` → journal replay followed by live `{seq, event}`.
+    /// Prime's exact RPC notifications appear as `event.type = "primeEvent"`.
+    pub const WATCH_RUN_EVENTS: &str = "WatchRunEvents";
+    /// `{chatId, action: "pause"|"resume"|"clear"}` routes a native
+    /// `/goal` command to the live Prime RPC session.
+    pub const PRIME_GOAL_ACTION: &str = "PrimeGoalAction";
+    /// `{chatId, action: "pause"|"resume"|"clear"}` controls the live
+    /// Codex thread goal through app-server.
+    pub const CODEX_GOAL_ACTION: &str = "CodexGoalAction";
     /// Messages typed while the agent was busy, held on the chat doc so every
     /// device sees the same queue. `{ chatId }` → `{ items: QueuedMessage[] }`.
     pub const WATCH_QUEUE: &str = "WatchQueue";

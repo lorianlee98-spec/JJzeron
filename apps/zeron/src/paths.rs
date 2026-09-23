@@ -25,20 +25,12 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
             .expect("LOCALAPPDATA and USERPROFILE not set; set ZERON_DATA_DIR");
-        local.join("Zeron")
+        local.join("JJzeron")
     }
     #[cfg(not(windows))]
     {
         let home = PathBuf::from(env("HOME").expect("HOME not set"));
-        let dir = home.join(".zeron");
-        // One-shot 0.2.0 migration: adopt the pre-rename data dir.
-        if !dir.exists() {
-            let old = home.join(".comet-native");
-            if old.exists() && std::fs::rename(&old, &dir).is_ok() {
-                eprintln!("migrated data dir {} -> {}", old.display(), dir.display());
-            }
-        }
-        dir
+        home.join(".jjzeron")
     }
 }
 
@@ -62,12 +54,29 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_default_keeps_existing_zeron_data_separate() {
+        let home = tempfile::tempdir().unwrap();
+        let old = home.path().join(".zeron");
+        let pre_rename = home.path().join(".comet-native");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&pre_rename).unwrap();
+
+        let data =
+            resolve_data_dir(|name| (name == "HOME").then(|| home.path().as_os_str().to_owned()));
+        assert_eq!(data, home.path().join(".jjzeron"));
+        assert!(old.exists());
+        assert!(pre_rename.exists());
+        assert!(!data.exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn explorer_launch_without_home_uses_local_app_data() {
         assert_eq!(
             resolve(&[("LOCALAPPDATA", r"C:\Users\Test User\AppData\Local")]),
-            PathBuf::from(r"C:\Users\Test User\AppData\Local\Zeron"),
+            PathBuf::from(r"C:\Users\Test User\AppData\Local\JJzeron"),
         );
     }
 
@@ -76,7 +85,7 @@ mod tests {
     fn windows_profile_fallback_handles_unicode_and_apostrophes() {
         assert_eq!(
             resolve(&[("USERPROFILE", r"C:\Users\O'Brien 日本語")]),
-            PathBuf::from(r"C:\Users\O'Brien 日本語\AppData\Local\Zeron"),
+            PathBuf::from(r"C:\Users\O'Brien 日本語\AppData\Local\JJzeron"),
         );
     }
 
@@ -85,7 +94,7 @@ mod tests {
     fn windows_default_does_not_depend_on_shell_home() {
         assert_eq!(
             resolve(&[("HOME", r"D:\msys-home"), ("LOCALAPPDATA", r"C:\Local")]),
-            PathBuf::from(r"C:\Local\Zeron"),
+            PathBuf::from(r"C:\Local\JJzeron"),
         );
     }
 }

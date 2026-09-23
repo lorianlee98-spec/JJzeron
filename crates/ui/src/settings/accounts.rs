@@ -1235,6 +1235,7 @@ impl Render for AccountsPage {
             HarnessId::Grok => (crate::icons::GROK_MARK, None),
             HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
             HarnessId::Pi => (crate::icons::PI_MARK, None),
+            HarnessId::Prime => (crate::icons::BOT, None),
             HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
             HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
             _ => (
@@ -1475,7 +1476,7 @@ impl Render for AccountsPage {
                             )
                             .child(widgets::page_subtitle(
                                 &theme,
-                                "The Claude Code, Codex, and Cursor logins on this device. Zeron \
+                                "The Claude Code, Codex, and Cursor logins on this device. JJzeron \
                                  detects the live session, keeps each account backed up, and can \
                                  swap between them.",
                             ))

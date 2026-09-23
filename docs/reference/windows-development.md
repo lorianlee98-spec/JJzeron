@@ -1,8 +1,8 @@
 # Windows development
 
 Windows supports native x64 source builds and portable release ZIPs. Release
-packages offer in-app updates through GitHub; keep `zeron-update.json` beside
-`zeron.exe`. Installers and background services are not supported yet.
+packages offer in-app updates through an explicit fork release feed; keep
+`jjzeron-update.json` beside `jjzeron.exe`. Installers and background services are not supported yet.
 
 ## Build and run
 
@@ -21,7 +21,7 @@ set `GPUI_FXC_PATH` to the Windows SDK's `fxc.exe`.
 
 | Setting | Behavior |
 | --- | --- |
-| Application data | `%LOCALAPPDATA%\Zeron`, falling back to `%USERPROFILE%\AppData\Local\Zeron`. Override with `ZERON_DATA_DIR`. |
+| Application data | `%LOCALAPPDATA%\JJzeron`, falling back to `%USERPROFILE%\AppData\Local\JJzeron`. Override with `ZERON_DATA_DIR`. |
 | Managed adapters | `ZERON_ADAPTERS_DIR`, then `ZERON_DATA_DIR/adapters`, then the default application's `adapters` directory. |
 | Provider credentials | Keep their provider-owned locations; changing Zeron's data root does not migrate them. |
 | `CODEX_EXECUTABLE` | Executable override. `.exe` (and `.com`) launch directly; `.cmd`/`.bat` shims launch through a wrapped `cmd.exe` with literal, individually escaped arguments. The override must exist on disk. |

@@ -4,9 +4,9 @@
 //! Repos are device-local (paths differ per machine), so the known set is a plain
 //! JSON list (`{data_dir}/repos.json`) — no sync. Existing repos can live anywhere
 //! the user points us; cloned/created ones land in `{data_dir}/repos`. Worktrees are
-//! created under `~/.zeron/worktrees/<repoName>/<worktreeName>` (NOT the data
+//! created under `~/.jjzeron/worktrees/<repoName>/<worktreeName>` (NOT the data
 //! dir — worktrees are user-facing working checkouts), with an auto-generated name +
-//! matching `zeron/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
+//! matching `jjzeron/<name>` branch. `ZERON_WORKTREES_DIR` overrides the root.
 //!
 //! All git access is via subprocess (`tokio::process`) — never libgit2.
 
@@ -88,7 +88,7 @@ fn default_worktrees_root() -> PathBuf {
     std::env::var_os("ZERON_WORKTREES_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir().join(".zeron").join("worktrees"))
+        .unwrap_or_else(|| home_dir().join(".jjzeron").join("worktrees"))
 }
 
 struct ReposInner {
@@ -126,7 +126,7 @@ impl Repos {
     }
 
     /// `data_dir` holds `repos.json` + cloned/created repos; the worktree root
-    /// comes from `$ZERON_WORKTREES_DIR` or `~/.zeron/worktrees`.
+    /// comes from `$ZERON_WORKTREES_DIR` or `~/.jjzeron/worktrees`.
     pub fn new(data_dir: &Path, device_id: &str) -> Self {
         Self::with_worktrees_root(data_dir, device_id, default_worktrees_root())
     }
@@ -1052,7 +1052,7 @@ impl Repos {
     // ── worktrees ───────────────────────────────────────────────────────────
 
     /// `git worktree add` an isolated checkout under
-    /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `zeron/<name>`
+    /// `{worktrees_root}/<repoName>/<generatedName>`, on a fresh `jjzeron/<name>`
     /// branch off `branch`.
     pub async fn create_worktree(
         &self,
@@ -1084,7 +1084,8 @@ impl Repos {
                 ADJECTIVES[(seed % ADJECTIVES.len() as u64) as usize],
                 NOUNS[((seed / 31) % NOUNS.len() as u64) as usize]
             );
-            if !base.join(&candidate).exists() && !existing.contains(&format!("zeron/{candidate}"))
+            if !base.join(&candidate).exists()
+                && !existing.contains(&format!("jjzeron/{candidate}"))
             {
                 name = Some(candidate);
                 break;
@@ -1093,7 +1094,7 @@ impl Repos {
         let name =
             name.ok_or_else(|| EngineError::Other("Could not allocate a worktree name".into()))?;
         let path = base.join(&name);
-        let branch_name = format!("zeron/{name}");
+        let branch_name = format!("jjzeron/{name}");
         self.git(
             &[
                 "worktree",
@@ -1133,7 +1134,7 @@ impl Repos {
     /// Rename a zeron-created worktree branch after its chat's generated title
     /// (port of zeron's `renameWorktreeBranch`). Guards:
     /// - respect an external checkout/rename: only act while the worktree is still
-    ///   on `expected_branch` AND that branch is the original `zeron/<folderName>`;
+    ///   on `expected_branch` AND that branch is the original `jjzeron/<folderName>`;
     /// - a title-slug collision gets a stable 6-hex suffix (hash of the worktree
     ///   path); a collision on THAT too fails.
     ///
@@ -1150,7 +1151,7 @@ impl Repos {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        if current != expected_branch || expected_branch != format!("zeron/{folder}") {
+        if current != expected_branch || expected_branch != format!("jjzeron/{folder}") {
             return Ok(current);
         }
         let preferred = worktree_branch_from_title(title);
@@ -1179,7 +1180,7 @@ impl Repos {
     }
 
     /// Best-effort worktree removal (if it still exists), then prune stale refs.
-    /// Deletes the worktree's branch ONLY when zeron created it (`zeron/…`) — the
+    /// Deletes the worktree's branch ONLY when JJzeron created it (`jjzeron/…`) — the
     /// user may have checked out their own branch inside the worktree.
     pub async fn delete_worktree(
         &self,
@@ -1209,7 +1210,7 @@ impl Repos {
             }
         }
         let _ = self.git(&["worktree", "prune"], Some(repo_path)).await;
-        if branch.starts_with("zeron/") {
+        if branch.starts_with("jjzeron/") {
             let _ = self.git(&["branch", "-D", &branch], Some(repo_path)).await;
         }
         Ok(())
@@ -1986,7 +1987,7 @@ pub fn worktree_branch_from_title(title: &str) -> String {
     }
     slug.truncate(48);
     let slug = slug.trim_matches('-');
-    format!("zeron/{}", if slug.is_empty() { "update" } else { slug })
+    format!("jjzeron/{}", if slug.is_empty() { "update" } else { slug })
 }
 
 fn bounded_field(value: &str, max_chars: usize) -> String {

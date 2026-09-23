@@ -124,15 +124,15 @@ pub enum CheckoutPlan {
     CurrentCheckout { branch: Option<String> },
     /// Reuse the picked ref's existing worktree (a cwd override; no git).
     ReuseWorktree { path: String, branch: String },
-    /// `CreateWorktree` off `base` on send (zeron mints a `zeron/<name>`
+    /// `CreateWorktree` off `base` on send (JJzeron mints a `jjzeron/<name>`
     /// branch). `base: None` = refs never loaded — send falls back to the
     /// space folder rather than failing.
     NewWorktree { base: Option<String> },
 }
 
 /// The fully-resolved run configuration the composer sends: concrete harness,
-/// model and reasoning (never a "default" passthrough once the catalog is
-/// loaded), plus the explicit non-default option picks.
+/// model and reasoning, plus the explicit non-default option picks. Prime's
+/// default selector deliberately lets the local CLI own its configured model.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedRunConfig {
     pub harness: Option<HarnessId>,
@@ -4507,7 +4507,7 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
     models
         .into_iter()
         .filter_map(|mut model| {
-            if has_real && model.id.eq_ignore_ascii_case("default") {
+            if has_real && harness != HarnessId::Prime && model.id.eq_ignore_ascii_case("default") {
                 return None;
             }
             if let Some(base) = strip_1m(&model.id.clone()) {
@@ -4567,6 +4567,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         // Nous Research's mark (the Hermes product icon), monochrome.
         HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
         HarnessId::Pi => (crate::icons::PI_MARK, None),
+        HarnessId::Prime => (crate::icons::BOT, None),
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
         HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
@@ -6307,6 +6308,17 @@ mod tests {
         let only_default =
             normalize_model_rows(HarnessId::Codex, vec![bare_model("default", "Default")]);
         assert_eq!(only_default.len(), 1);
+        let prime = normalize_model_rows(
+            HarnessId::Prime,
+            vec![
+                bare_model("default", "Prime default"),
+                bare_model("specific", "Specific"),
+            ],
+        );
+        assert_eq!(
+            prime.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["default", "specific"]
+        );
 
         // A base-plus-variant pair (already folded by a NEWER engine — the
         // variant never reaches us; belt-and-braces if it does): variant

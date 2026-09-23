@@ -616,6 +616,135 @@ impl SessionsEngine {
         Ok(SteerOutcome::Accepted)
     }
 
+    /// Control the native goal in the chat's harness session. A warm child
+    /// receives the command through its mailbox. After an app restart, pause
+    /// and clear reopen the same native session without adding a chat turn.
+    /// Resume may start an agent turn, so it follows the normal dispatch path.
+    pub async fn goal_action(
+        &self,
+        chat_id: &str,
+        harness_id: HarnessId,
+        action: &str,
+    ) -> Result<(), EngineError> {
+        if !matches!(harness_id, HarnessId::Prime | HarnessId::Codex) {
+            return Err(EngineError::Other("unsupported goal harness".into()));
+        }
+        if !matches!(action, "pause" | "resume" | "clear") {
+            return Err(EngineError::Other("invalid goal action".into()));
+        }
+        let prompt = format!("/goal {action}");
+        if let Some(run) = lock(&self.inner.runs).get(chat_id) {
+            if run.runtime_config.harness_id != harness_id || !run.steerable {
+                return Err(EngineError::Other(
+                    "chat has a different active session".into(),
+                ));
+            }
+            return run
+                .steer_tx
+                .try_send(SteerMessage {
+                    prompt,
+                    message_id: None,
+                })
+                .map_err(|error| {
+                    EngineError::Other(format!("goal command was not accepted: {error}"))
+                });
+        }
+
+        let latest = self
+            .inner
+            .journal
+            .replay(chat_id, 0)?
+            .into_iter()
+            .filter_map(|(_, event)| match event {
+                AgentEvent::SessionStarted {
+                    harness,
+                    session_id,
+                    cwd,
+                    ..
+                } => Some((harness, session_id, cwd)),
+                _ => None,
+            })
+            .last()
+            .ok_or_else(|| EngineError::Other("chat has no native session to resume".into()))?;
+        let (latest_harness, session_id, cwd) = latest;
+        if latest_harness != harness_id
+            || self.inner.resume_for(chat_id, &cwd).as_deref() != Some(&session_id)
+        {
+            return Err(EngineError::Other(
+                "chat's native goal session is unavailable".into(),
+            ));
+        }
+        let mut request = self
+            .inner
+            .doc_host()
+            .and_then(|host| host.request_from_chat_row(chat_id, &prompt))
+            .unwrap_or(RunRequest {
+                prompt: prompt.clone(),
+                harness: Some(harness_id),
+                model: None,
+                reasoning: None,
+                model_options: Default::default(),
+                cwd: cwd.clone(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                auto_approve: false,
+                resume: None,
+                attachments: Vec::new(),
+                worktree: None,
+            });
+        request.prompt = prompt;
+        request.cwd = cwd;
+        request.resume = Some(session_id);
+        request.attachments.clear();
+        request.worktree = None;
+
+        if action == "resume" {
+            self.dispatch(chat_id, harness_id, request, None).await?;
+            return Ok(());
+        }
+
+        let harness = self.inner.registry.resolve(harness_id)?;
+        let (steer_tx, steering) = mpsc::channel(1);
+        let interrupt = CancellationToken::new();
+        let controls = RunControls {
+            request_input: Box::new(|_| oneshot::channel().1),
+            steering,
+            interrupt: interrupt.clone(),
+        };
+        let mut stream = harness.run(request, controls).await?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut goal_update = None;
+            while let Some(event) = stream.next().await {
+                match event? {
+                    update @ AgentEvent::GoalUpdate { .. } => goal_update = Some(update),
+                    AgentEvent::PrimeEvent { event } if event["type"] == "goal_update" => {
+                        goal_update = Some(AgentEvent::PrimeEvent { event });
+                    }
+                    AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        ..
+                    } => return Ok(goal_update),
+                    AgentEvent::Done { error, .. } => {
+                        return Err(EngineError::Other(
+                            error.unwrap_or_else(|| "goal command failed".into()),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            Err(EngineError::Other(
+                "goal session ended without a result".into(),
+            ))
+        })
+        .await;
+        interrupt.cancel();
+        drop(steer_tx);
+        let update = result
+            .map_err(|_| EngineError::Other("goal command timed out".into()))??
+            .ok_or_else(|| EngineError::Other("goal command returned no goal state".into()))?;
+        self.inner.publish(chat_id, &update);
+        Ok(())
+    }
+
     /// Interrupt the live run, if any. The run settles with a synthetic
     /// `Done{interrupted}` and its streaming entry stamped `aborted`; this waits
     /// (bounded) for that settlement so callers observe a consistent doc.
@@ -850,7 +979,42 @@ impl Inner {
             parents.push(parent_tool_use_id);
             leaf = *event;
         }
-        let events = if let AgentEvent::GeneratedImage { id, path, .. } = leaf {
+        let events = if let AgentEvent::InlineImage { id, data, .. } = leaf {
+            let key = std::iter::once(chat_id)
+                .chain(parents.iter().map(String::as_str))
+                .chain(std::iter::once(id.as_str()))
+                .collect::<Vec<_>>()
+                .join("\0");
+            if seen.contains(&key) {
+                return vec![];
+            }
+            let result = if let Some((uploads, _)) = self.generated_images.get() {
+                let uploads = uploads.clone();
+                let stable_key = key.clone();
+                tokio::task::spawn_blocking(move || uploads.import_inline_image(&data, &stable_key))
+                    .await
+                    .unwrap_or_else(|error| Err(EngineError::Other(error.to_string())))
+            } else {
+                Err(EngineError::Other("Image intake is not configured".into()))
+            };
+            match result {
+                Ok(image) => {
+                    seen.insert(key);
+                    vec![AgentEvent::GeneratedImage {
+                        id,
+                        path: image.path,
+                        name: image.name,
+                        mime_type: image.mime_type,
+                    }]
+                }
+                Err(error) => {
+                    tracing::warn!(chat = %chat_id, error = %error, "tool image import failed");
+                    vec![AgentEvent::Error {
+                        message: "Tool image unavailable".into(),
+                    }]
+                }
+            }
+        } else if let AgentEvent::GeneratedImage { id, path, .. } = leaf {
             let key = std::iter::once(chat_id)
                 .chain(parents.iter().map(String::as_str))
                 .chain(std::iter::once(id.as_str()))
@@ -1863,6 +2027,20 @@ async fn drive_run(
             event
         };
 
+        // Prime notifications preserve the native event shape for subscribers;
+        // image payload bytes are removed before they reach this stream.
+        // They do not alter transcript state, and must remain observable even
+        // when a persistent session is parked after its last Done.
+        if matches!(
+            &event,
+            AgentEvent::PrimeEvent { .. } | AgentEvent::GoalUpdate { .. }
+        ) {
+            inner.touch_session(&chat_id);
+            last_stream_activity = tokio::time::Instant::now();
+            inner.publish(&chat_id, &event);
+            continue;
+        }
+
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
         // into the subagent's own doc, and the parent keeps only the spawn
@@ -2054,6 +2232,13 @@ async fn drive_run(
             if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
                 tracing::warn!(%chat_id, error = %err, "context usage write failed");
             }
+            continue;
+        }
+        // A native control command may fail while Prime is parked between
+        // turns. Keep the failure visible to event subscribers without
+        // fabricating a new transcript segment.
+        if idle_since.is_some() && matches!(&event, AgentEvent::Error { .. }) {
+            inner.publish(&chat_id, &event);
             continue;
         }
         // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT

@@ -696,16 +696,15 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
 
     // The mock's scripted reply doubles as the titling model's output.
     let chat = wait_for("chat title", || {
-        core.workspace
-            .chat(chat_id)
-            .ok()
-            .flatten()
-            .filter(|c| c.title.as_deref().is_some_and(|t| !t.is_empty()))
+        core.workspace.chat(chat_id).ok().flatten().filter(|c| {
+            c.title.as_deref() == Some("Fix Login Flow")
+                && c.branch.as_deref() == Some("jjzeron/fix-login-flow")
+        })
     })
     .await;
     assert_eq!(chat.title.as_deref(), Some("Fix Login Flow"));
     // Branch renamed from the title, chat row updated to match.
-    assert_eq!(chat.branch.as_deref(), Some("zeron/fix-login-flow"));
+    assert_eq!(chat.branch.as_deref(), Some("jjzeron/fix-login-flow"));
     let head = tokio::process::Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(&worktree.path)
@@ -714,7 +713,7 @@ async fn titling_e2e_names_chat_and_renames_worktree_branch() {
         .expect("git");
     assert_eq!(
         String::from_utf8_lossy(&head.stdout).trim(),
-        "zeron/fix-login-flow"
+        "jjzeron/fix-login-flow"
     );
 
     // A titled chat is never re-titled: rename, run again, title sticks.
@@ -762,7 +761,7 @@ async fn rename_worktree_branch_guards_and_collisions() {
 
     // Guard: expected branch mismatch → no-op, returns the actual branch.
     let unchanged = repos
-        .rename_worktree_branch(wt_path, "zeron/not-this-one", "Some Title")
+        .rename_worktree_branch(wt_path, "jjzeron/not-this-one", "Some Title")
         .await
         .expect("guarded");
     assert_eq!(unchanged, wt.branch);
@@ -772,15 +771,15 @@ async fn rename_worktree_branch_guards_and_collisions() {
         .rename_worktree_branch(wt_path, &wt.branch, "Add Dark Mode!")
         .await
         .expect("renamed");
-    assert_eq!(renamed, "zeron/add-dark-mode");
+    assert_eq!(renamed, "jjzeron/add-dark-mode");
 
-    // Already renamed → the guard (branch no longer zeron/<folder>) makes any
+    // Already renamed → the guard (branch no longer jjzeron/<folder>) makes any
     // further title rename a no-op.
     let again = repos
-        .rename_worktree_branch(wt_path, "zeron/add-dark-mode", "Different Title")
+        .rename_worktree_branch(wt_path, "jjzeron/add-dark-mode", "Different Title")
         .await
         .expect("second rename");
-    assert_eq!(again, "zeron/add-dark-mode");
+    assert_eq!(again, "jjzeron/add-dark-mode");
 
     // Collision: a second worktree whose title slug already exists gets the
     // stable hash suffix.
@@ -793,20 +792,20 @@ async fn rename_worktree_branch_guards_and_collisions() {
         .await
         .expect("suffixed rename");
     assert!(
-        renamed2.starts_with("zeron/add-dark-mode-")
-            && renamed2.len() == "zeron/add-dark-mode-".len() + 6,
+        renamed2.starts_with("jjzeron/add-dark-mode-")
+            && renamed2.len() == "jjzeron/add-dark-mode-".len() + 6,
         "suffixed: {renamed2}"
     );
 
     // Slug edge cases.
     assert_eq!(
         worktree_branch_from_title("  Fix `Login` Flow!  "),
-        "zeron/fix-login-flow"
+        "jjzeron/fix-login-flow"
     );
-    assert_eq!(worktree_branch_from_title("***"), "zeron/update");
+    assert_eq!(worktree_branch_from_title("***"), "jjzeron/update");
     assert_eq!(
         worktree_branch_from_title("Cafe's Dark Mode"),
-        "zeron/cafes-dark-mode"
+        "jjzeron/cafes-dark-mode"
     );
 }
 

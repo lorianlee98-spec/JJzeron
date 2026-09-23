@@ -8,14 +8,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 VERSION="$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/')"
-DEV_ROOT="$ROOT/target/macos-dev"
-APP="$DEV_ROOT/Zeron Dev.app"
+DEV_ROOT="$ROOT/target/jjzeron-macos-dev"
+APP="$DEV_ROOT/JJzeron Dev.app"
 CONTENTS="$APP/Contents"
 DATA_DIR="${ZERON_DEV_DATA_DIR:-$DEV_ROOT/data}"
-IPC_PORT="${ZERON_DEV_IPC_PORT:-49777}"
+IPC_PORT="${ZERON_DEV_IPC_PORT:-49778}"
 
-if pgrep -f -x "$CONTENTS/MacOS/zeron" >/dev/null 2>&1; then
-  echo "Zeron Dev is already running. Quit it before rebuilding the signed bundle." >&2
+if pgrep -f -x "$CONTENTS/MacOS/jjzeron" >/dev/null 2>&1; then
+  echo "JJzeron Dev is already running. Quit it before rebuilding the signed bundle." >&2
   exit 1
 fi
 
@@ -23,7 +23,7 @@ cd "$ROOT"
 cargo build -p zeron
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$DATA_DIR"
-install -m 755 "$ROOT/target/debug/zeron" "$CONTENTS/MacOS/zeron"
+install -m 755 "$ROOT/target/debug/jjzeron" "$CONTENTS/MacOS/jjzeron"
 sed "s/__VERSION__/$VERSION/g" "$ROOT/dist/macos/Info-dev.plist" >"$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_DATA_DIR -string "$DATA_DIR" "$CONTENTS/Info.plist"
 plutil -replace LSEnvironment.ZERON_IPC_PORT -string "$IPC_PORT" "$CONTENTS/Info.plist"
@@ -47,17 +47,17 @@ if [[ -z "$IDENTITY" ]]; then
   IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)"
 fi
 if [[ -n "$IDENTITY" ]]; then
-  codesign --force --sign "$IDENTITY" --identifier sh.zeron.app.dev "$APP"
+  codesign --force --sign "$IDENTITY" --identifier sh.jjzeron.app.dev "$APP"
 else
-  codesign --force --sign - --identifier sh.zeron.app.dev "$APP"
+  codesign --force --sign - --identifier sh.jjzeron.app.dev "$APP"
   echo "warning: no Apple Development signing identity found; macOS may ask for permissions again after a rebuild" >&2
 fi
 
-echo "running Zeron Dev (bundle sh.zeron.app.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2
-# LaunchServices must own the process. Launching Contents/MacOS/zeron directly
+echo "running JJzeron Dev (bundle sh.jjzeron.app.dev, data $DATA_DIR, IPC $IPC_PORT)" >&2
+# LaunchServices must own the process. Launching Contents/MacOS/jjzeron directly
 # makes TCC attribute Screen Recording to the terminal (Warp, Terminal, etc.).
 # -W keeps the script attached until the app exits. Runtime logs remain in the
-# isolated data directory (`target/macos-dev/data/logs/zeron-headed.log`).
+# isolated data directory (`target/jjzeron-macos-dev/data/logs/zeron-headed.log`).
 OPEN_ENV=(
   --env "ZERON_DATA_DIR=$DATA_DIR"
   --env "ZERON_IPC_PORT=$IPC_PORT"

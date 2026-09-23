@@ -66,6 +66,7 @@ enum BrandMark {
         case "grok": return .grok
         case "hermes": return .hermes
         case "pi": return .pi
+        case "prime": return .pi
         case "opencode": return .opencode
         case "antigravity": return .antigravity
         default: return .claude  // claude-code + mock share the mark, like the desktop

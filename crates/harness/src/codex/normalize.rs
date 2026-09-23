@@ -356,12 +356,42 @@ pub(crate) fn map_item(phase: Phase, item: &Value) -> Vec<AgentEvent> {
                     },
                 }]
             }
-            Phase::Completed => vec![AgentEvent::ToolResult {
+            Phase::Completed => {
+                let mut events = vec![AgentEvent::ToolResult {
+                    id: id.clone(),
+                    is_error: status == "failed",
+                    output: None,
+                    diff: None,
+                }];
+                if let Some(content) = item.pointer("/result/content") {
+                    events.extend(crate::tool_images::events(&id, content));
+                }
+                events
+            }
+        },
+        "dynamicToolCall" | "dynamic_tool_call" => match phase {
+            Phase::Started => vec![AgentEvent::ToolCall {
                 id,
-                is_error: status == "failed",
-                output: None,
-                diff: None,
+                call: ToolCall::Unknown {
+                    name: str_field(item, &["tool"]),
+                    input: item
+                        .get("arguments")
+                        .filter(|value| !value.is_null())
+                        .cloned(),
+                },
             }],
+            Phase::Completed => {
+                let mut events = vec![AgentEvent::ToolResult {
+                    id: id.clone(),
+                    is_error: status == "failed" || item["success"] == false,
+                    output: None,
+                    diff: None,
+                }];
+                if let Some(content) = item.get("contentItems") {
+                    events.extend(crate::tool_images::events(&id, content));
+                }
+                events
+            }
         },
         "webSearch" | "web_search" => tool_lifecycle(
             phase,
@@ -1132,5 +1162,38 @@ mod generated_image_tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn mcp_image_result_becomes_a_durable_image_intake_event() {
+        let events = map_item(
+            Phase::Completed,
+            &json!({
+                "type": "mcpToolCall",
+                "id": "mcp-image",
+                "status": "completed",
+                "result": {"content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image", "mimeType": "image/png", "data": "aGVsbG8="}
+                ]}
+            }),
+        );
+        assert!(matches!(&events[0], AgentEvent::ToolResult { id, .. } if id == "mcp-image"));
+        assert!(
+            matches!(&events[1], AgentEvent::InlineImage { id, data, .. } if id == "mcp-image:image:1" && data == "aGVsbG8=")
+        );
+        let dynamic = map_item(
+            Phase::Completed,
+            &json!({
+                "type": "dynamicToolCall",
+                "id": "dynamic-image",
+                "status": "completed",
+                "success": true,
+                "contentItems": [{"type":"inputImage","imageUrl":"data:image/jpeg;base64,d29ybGQ="}]
+            }),
+        );
+        assert!(
+            matches!(&dynamic[1], AgentEvent::InlineImage { id, .. } if id == "dynamic-image:image:0")
+        );
     }
 }

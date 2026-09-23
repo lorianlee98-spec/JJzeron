@@ -55,7 +55,7 @@ use base64::Engine as _;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -86,6 +86,28 @@ const FILE_SEARCH_FEATURED_PATHS: usize = 32;
 #[serde(rename_all = "camelCase")]
 struct ChatParams {
     chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchRunEventsParams {
+    chat_id: String,
+    #[serde(default)]
+    after_seq: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrimeGoalActionParams {
+    chat_id: String,
+    action: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexGoalActionParams {
+    chat_id: String,
+    action: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1123,6 +1145,9 @@ fn forwardable(method: &str) -> bool {
             | methods::QUEUE_COMMAND
             | methods::TAKE_PROJECT_ACTION_SETUP
             | methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_RUN_EVENTS
+            | methods::PRIME_GOAL_ACTION
+            | methods::CODEX_GOAL_ACTION
             // The queue lives on the chat doc, and only its host may send from
             // it — same addressing as the command ledger next door.
             | methods::WATCH_QUEUE
@@ -1200,6 +1225,7 @@ fn is_stream_method(method: &str) -> bool {
     matches!(
         method,
         methods::WATCH_DOC_MESSAGES
+            | methods::WATCH_RUN_EVENTS
             | methods::WATCH_QUEUE
             | methods::SUBSCRIBE_TERMINAL
             | methods::WATCH_CHECKOUT_DIFFS
@@ -1626,6 +1652,80 @@ impl RpcService for EngineRpc {
                     handle.watch_messages(),
                     handle.doc_arc(),
                 )))
+            }
+            methods::WATCH_RUN_EVENTS => {
+                let p: WatchRunEventsParams = parse_params(params)?;
+                let (replay, live) = self
+                    .sessions
+                    .subscribe(&p.chat_id, p.after_seq)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                let after = if replay.first().is_some_and(|event| event.seq <= p.after_seq) {
+                    0 // Journal was replaced; the existing cursor belongs to an old era.
+                } else {
+                    p.after_seq
+                };
+                let stream = futures::stream::unfold(
+                    (
+                        VecDeque::from(replay),
+                        live,
+                        after,
+                        self.sessions.clone(),
+                        p.chat_id,
+                    ),
+                    |(mut pending, mut live, mut after, sessions, chat_id)| async move {
+                        loop {
+                            let item = if let Some(item) = pending.pop_front() {
+                                item
+                            } else {
+                                match live.recv().await {
+                                    Ok(item) => item,
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        let Ok((replay, receiver)) =
+                                            sessions.subscribe(&chat_id, after)
+                                        else {
+                                            return None;
+                                        };
+                                        pending = VecDeque::from(replay);
+                                        live = receiver;
+                                        continue;
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                        return None;
+                                    }
+                                }
+                            };
+                            if item.seq <= after {
+                                continue;
+                            }
+                            after = item.seq;
+                            let value = serde_json::json!({ "seq": item.seq, "event": item.event });
+                            return Some((value, (pending, live, after, sessions, chat_id)));
+                        }
+                    },
+                );
+                Ok(RpcReply::Stream(stream.boxed()))
+            }
+            methods::PRIME_GOAL_ACTION => {
+                let p: PrimeGoalActionParams = parse_params(params)?;
+                if !matches!(p.action.as_str(), "pause" | "resume" | "clear") {
+                    return Err(RpcError::BadParams("invalid Prime goal action".into()));
+                }
+                self.sessions
+                    .goal_action(&p.chat_id, HarnessId::Prime, &p.action)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "accepted": true }))
+            }
+            methods::CODEX_GOAL_ACTION => {
+                let p: CodexGoalActionParams = parse_params(params)?;
+                if !matches!(p.action.as_str(), "pause" | "resume" | "clear") {
+                    return Err(RpcError::BadParams("invalid Codex goal action".into()));
+                }
+                self.sessions
+                    .goal_action(&p.chat_id, HarnessId::Codex, &p.action)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "accepted": true }))
             }
             methods::WATCH_QUEUE => {
                 let p: ChatParams = parse_params(params)?;

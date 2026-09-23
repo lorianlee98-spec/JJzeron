@@ -15,10 +15,10 @@ use zeron_doc::{
 };
 use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
 use zeron_harness::mock::MockHarness;
-use zeron_harness::{Harness, HarnessError, RunControls};
+use zeron_harness::{CodexHarness, Harness, HarnessError, PrimeHarness, RunControls};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode, ToolCall,
+    SessionStatus, SteeringMode, ToolCall, UserInputAnswer,
 };
 use zeron_sync::DocsStore;
 
@@ -920,6 +920,411 @@ async fn recover_stale_journal_stamps_aborted_on_boot() {
     assert_eq!(
         core.sessions.session_status(CHAT).map(|s| s.status),
         Some(SessionStatus::Idle)
+    );
+}
+
+#[tokio::test]
+async fn prime_native_events_replay_over_rpc_without_changing_the_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let notification = serde_json::json!({"type": "future_prime_event", "payload": {"n": 42}});
+    let trailing =
+        serde_json::json!({"type": "session_action_update", "actions": {"queuedCount": 0}});
+    let core = assemble(
+        dir.path(),
+        Arc::new(ScriptedHarness {
+            script: vec![
+                AgentEvent::SessionStarted {
+                    harness: HarnessId::Prime,
+                    model: "local/configured".into(),
+                    tools: vec![],
+                    cwd: "/tmp".into(),
+                    session_id: "prime-session.jsonl".into(),
+                    assistant_message_id: "a-prime".into(),
+                },
+                AgentEvent::PrimeEvent {
+                    event: notification.clone(),
+                },
+                AgentEvent::TextDelta {
+                    text: "hello".into(),
+                },
+                done(DoneStatus::Completed),
+                AgentEvent::PrimeEvent {
+                    event: trailing.clone(),
+                },
+            ],
+            step_delay: Duration::from_millis(1),
+            hang_until_interrupt: false,
+        }),
+    );
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let params = serde_json::json!({"chatId": CHAT});
+    let mut live = client
+        .subscribe(zeron_rpc::methods::WATCH_RUN_EVENTS, params.clone())
+        .await
+        .unwrap();
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mock, run_request("go"), None)
+        .await
+        .unwrap();
+    let mut first_native_seq = None;
+    let mut trailing_seq = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(item) = live.recv().await {
+            if item["event"]["type"] == "primeEvent" && item["event"]["event"] == notification {
+                first_native_seq = item["seq"].as_u64();
+            }
+            if item["event"]["type"] == "primeEvent" && item["event"]["event"] == trailing {
+                trailing_seq = item["seq"].as_u64();
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let first = first_native_seq.expect("native event published");
+    let last = trailing_seq.expect("post-Done native event published");
+    assert!(last > first);
+    drop(live);
+
+    let mut resumed = client
+        .subscribe(
+            zeron_rpc::methods::WATCH_RUN_EVENTS,
+            serde_json::json!({"chatId": CHAT, "afterSeq": first}),
+        )
+        .await
+        .unwrap();
+    let replayed = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut values = Vec::new();
+        while let Some(item) = resumed.recv().await {
+            let done = item["seq"] == last;
+            values.push(item);
+            if done {
+                break;
+            }
+        }
+        values
+    })
+    .await
+    .unwrap();
+    assert!(
+        replayed
+            .iter()
+            .all(|item| item["seq"].as_u64().unwrap() > first)
+    );
+    assert_eq!(replayed.last().unwrap()["event"]["event"], trailing);
+    let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
+    assert!(journal.stale_sessions().unwrap().is_empty());
+    wait_for(
+        || {
+            entries(&core).iter().any(|entry| {
+                entry.role == MessageRole::Assistant
+                    && entry.status == Some(MessageStatus::Complete)
+            })
+        },
+        "completed Prime transcript",
+    )
+    .await;
+    assert!(entries(&core).iter().any(|entry| {
+        entry.role == MessageRole::Assistant
+            && entry
+                .parts
+                .iter()
+                .any(|part| matches!(part, MessagePart::Text { text, .. } if text == "hello"))
+    }));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn prime_goal_action_uses_native_rpc_without_a_user_message() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("prime-agent");
+    std::fs::write(
+        &executable,
+        include_str!("../../harness/tests/fixtures/prime-rpc.py"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(PrimeHarness::new().with_executable(&executable)));
+    let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Prime, None)
+        .expect("engine core assembles");
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let mut events = client
+        .subscribe(
+            zeron_rpc::methods::WATCH_RUN_EVENTS,
+            serde_json::json!({"chatId": CHAT}),
+        )
+        .await
+        .unwrap();
+    let mut request = run_request("Finish work");
+    request.cwd = dir.path().display().to_string();
+    core.sessions
+        .dispatch(CHAT, HarnessId::Prime, request, None)
+        .await
+        .unwrap();
+    let mut initial_goal = None;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(item) = events.recv().await {
+            if item["event"]["type"] == "inputRequested" {
+                core.sessions
+                    .respond_input(
+                        CHAT,
+                        item["event"]["requestId"].as_str().unwrap(),
+                        vec![UserInputAnswer {
+                            question_id: item["event"]["questions"][0]["id"]
+                                .as_str()
+                                .unwrap()
+                                .to_owned(),
+                            labels: vec!["Yes".into()],
+                        }],
+                    )
+                    .unwrap();
+            }
+            if item["event"]["type"] == "primeEvent"
+                && item["event"]["event"]["type"] == "goal_update"
+                && item["event"]["event"]["source"] == "get_state"
+            {
+                initial_goal = Some(item["event"]["event"]["goal"].clone());
+            }
+            if item["event"]["type"] == "done" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(initial_goal.unwrap()["status"], "active");
+    let before = entries(&core);
+    let invalid = client
+        .call(
+            zeron_rpc::methods::PRIME_GOAL_ACTION,
+            serde_json::json!({"chatId": CHAT, "action": "erase-everything"}),
+        )
+        .await;
+    assert!(invalid.is_err());
+    client
+        .call(
+            zeron_rpc::methods::PRIME_GOAL_ACTION,
+            serde_json::json!({"chatId": CHAT, "action": "pause"}),
+        )
+        .await
+        .unwrap();
+    let goal = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let item = events.recv().await.expect("run event");
+            if item["event"]["type"] == "primeEvent"
+                && item["event"]["event"]["type"] == "goal_update"
+            {
+                break item;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(goal["event"]["event"]["goal"]["status"], "paused");
+    client
+        .call(
+            zeron_rpc::methods::PRIME_GOAL_ACTION,
+            serde_json::json!({"chatId": CHAT, "action": "resume"}),
+        )
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let item = events.recv().await.expect("run event");
+            if item["event"]["type"] == "error" {
+                break item;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        error["event"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("goal cannot resume")
+    );
+    client
+        .call(
+            zeron_rpc::methods::PRIME_GOAL_ACTION,
+            serde_json::json!({"chatId": CHAT, "action": "clear"}),
+        )
+        .await
+        .unwrap();
+    let cleared = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let item = events.recv().await.expect("run event");
+            if item["event"]["type"] == "primeEvent"
+                && item["event"]["event"]["type"] == "goal_update"
+            {
+                break item;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(cleared["event"]["event"]["goal"].is_null());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prime-goal-actions.log")).unwrap(),
+        "/goal pause\n/goal resume\n/goal clear\n"
+    );
+    assert_eq!(entries(&core), before);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_control_reopens_prime_session_after_restart_without_a_chat_turn() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("prime-agent");
+    std::fs::write(
+        &executable,
+        include_str!("../../harness/tests/fixtures/prime-rpc.py"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let assemble = || {
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(PrimeHarness::new().with_executable(&executable)));
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Prime, None).unwrap()
+    };
+    let core = assemble();
+    let mut request = run_request("/goal status");
+    request.cwd = dir.path().display().to_string();
+    core.sessions
+        .dispatch(CHAT, HarnessId::Prime, request, None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .subscribe(CHAT, 0)
+                .unwrap()
+                .0
+                .iter()
+                .any(|item| {
+                    matches!(
+                        item.event,
+                        AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            ..
+                        }
+                    )
+                })
+        },
+        "initial Prime goal status",
+    )
+    .await;
+    core.sessions.shutdown().await;
+    drop(core);
+
+    let core = assemble();
+    let before = entries(&core);
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::PRIME_GOAL_ACTION,
+            serde_json::json!({"chatId": CHAT, "action": "clear"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(entries(&core), before);
+    assert!(
+        core.sessions
+            .subscribe(CHAT, 0)
+            .unwrap()
+            .0
+            .iter()
+            .any(|item| {
+                matches!(&item.event, AgentEvent::PrimeEvent { event }
+            if event["type"] == "goal_update" && event["goal"].is_null())
+            })
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("prime-goal-actions.log")).unwrap(),
+        "/goal clear\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn goal_control_reopens_codex_thread_after_restart_without_a_chat_turn() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let executable = dir.path().join("codex");
+    std::fs::write(
+        &executable,
+        include_str!("../../harness/tests/fixtures/fake-codex.sh"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let assemble = || {
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(CodexHarness::new().with_executable(&executable)));
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Codex, None).unwrap()
+    };
+    let core = assemble();
+    let mut request = run_request("scenario:resumed");
+    request.cwd = dir.path().display().to_string();
+    request.model = Some("goal-fixture".into());
+    core.sessions
+        .dispatch(CHAT, HarnessId::Codex, request, None)
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            core.sessions
+                .subscribe(CHAT, 0)
+                .unwrap()
+                .0
+                .iter()
+                .any(|item| {
+                    matches!(
+                        item.event,
+                        AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            ..
+                        }
+                    )
+                })
+        },
+        "initial Codex thread",
+    )
+    .await;
+    core.sessions.shutdown().await;
+    drop(core);
+
+    let core = assemble();
+    let before = entries(&core);
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    client
+        .call(
+            zeron_rpc::methods::CODEX_GOAL_ACTION,
+            serde_json::json!({"chatId": CHAT, "action": "clear"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(entries(&core), before);
+    assert!(
+        core.sessions
+            .subscribe(CHAT, 0)
+            .unwrap()
+            .0
+            .iter()
+            .any(|item| {
+                matches!(
+                    &item.event,
+                    AgentEvent::GoalUpdate {
+                        harness: HarnessId::Codex,
+                        goal: None
+                    }
+                )
+            })
     );
 }
 
@@ -2514,6 +2919,7 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
 /// Real drive_run + journal + Loro, with an isolated Codex source root.
 #[tokio::test]
 async fn generated_image_is_materialized_before_publication_and_survives_reopen() {
+    use base64::Engine as _;
     use zeron_engine::{DocHost, DocHostConfig, SessionsEngine, Uploads};
     let dir = tempfile::tempdir().unwrap();
     let source_root = dir.path().join("codex/generated_images");
@@ -2526,6 +2932,13 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
         path: source.to_string_lossy().into_owned(),
         name: "untrusted".into(),
         mime_type: "untrusted".into(),
+    };
+    let inline_bytes = b"\x89PNG\r\n\x1a\nTOOL_IMAGE_SENTINEL";
+    let inline_data = base64::engine::general_purpose::STANDARD.encode(inline_bytes);
+    let inline = AgentEvent::InlineImage {
+        id: "tool-1:image:0".into(),
+        data: inline_data.clone(),
+        mime_type: "image/png".into(),
     };
     let script = vec![
         AgentEvent::ToolCall {
@@ -2543,6 +2956,8 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
         },
         image.clone(),
         image.clone(),
+        inline.clone(),
+        inline,
         done(DoneStatus::Completed),
     ];
     let registry = registry_with(Arc::new(MockHarness { script }));
@@ -2586,16 +3001,26 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
             }
         })
         .collect();
-    assert_eq!(images.len(), 1);
-    assert!(std::path::Path::new(&images[0]).starts_with(uploads.dir()));
+    assert_eq!(images.len(), 2);
+    assert!(
+        images
+            .iter()
+            .all(|path| std::path::Path::new(path)
+                .starts_with(uploads.dir().canonicalize().unwrap())),
+        "images={images:?} uploads={:?}",
+        uploads.dir()
+    );
     let serialized = serde_json::to_string(&journal.replay(CHAT, 0).unwrap()).unwrap();
     assert!(!serialized.contains(source.to_str().unwrap()));
     assert!(!serialized.contains("BASE64_SENTINEL"));
+    assert!(!serialized.contains(&inline_data));
     let doc_json = serde_json::to_string(&entries).unwrap();
     assert!(!doc_json.contains(source.to_str().unwrap()));
     assert!(!doc_json.contains("BASE64_SENTINEL"));
+    assert!(!doc_json.contains(&inline_data));
     std::fs::remove_file(&source).unwrap();
     assert_eq!(std::fs::read(&images[0]).unwrap(), bytes);
+    assert_eq!(std::fs::read(&images[1]).unwrap(), inline_bytes);
     let imported = loro::LoroDoc::new();
     imported
         .import(&handle.doc().export_snapshot().unwrap())
@@ -2627,7 +3052,7 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
             .flat_map(|e| &e.parts)
             .filter(|p| matches!(p, MessagePart::Image { .. }))
             .count(),
-        1
+        2
     );
     assert!(
         !handle

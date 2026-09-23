@@ -4,7 +4,8 @@
 //!
 //! VERSION PIN: the app-server API is EXPERIMENTAL (`capabilities.
 //! experimentalApi`); this driver is validated against codex-cli 0.153.4 —
-//! imageGeneration additionally follows the 0.154.0 schema (savedPath only).
+//! imageGeneration additionally follows the 0.154.0 schema (savedPath only),
+//! and thread/goal/* follows the 0.155.1 schema.
 //! Revalidate the method/notification surface when bumping past it.
 //!
 //! - `initialize` handshake (clientInfo + `capabilities.experimentalApi`) then
@@ -39,6 +40,7 @@
 pub(crate) mod catalog;
 mod normalize;
 mod subagents;
+mod tool_images;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -49,6 +51,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
 
@@ -630,6 +633,11 @@ impl Harness for CodexHarness {
                 description: "Review uncommitted changes, or supply review instructions".into(),
                 input_hint: Some("optional instructions".into()),
             },
+            SlashCommand {
+                name: "goal".into(),
+                description: "Set or view a persistent goal; pause, resume, or clear it".into(),
+                input_hint: Some("objective or status/pause/resume/clear".into()),
+            },
         ])
     }
 
@@ -863,7 +871,7 @@ fn command_request(
     let Some((name, args)) = zeron_proto::invocation::leading_command(&decoded) else {
         return Ok(None);
     };
-    if matches!(name, "compact" | "review")
+    if matches!(name, "compact" | "review" | "goal")
         && zeron_proto::invocation::invocation_links(text)
             .iter()
             .any(|(_, invocation)| {
@@ -878,6 +886,51 @@ fn command_request(
         ));
     }
     match name {
+        "goal" => {
+            let args = args.trim();
+            match args {
+                "" | "status" => Ok(Some(("thread/goal/get", json!({"threadId": thread_id})))),
+                "pause" | "resume" => Ok(Some((
+                    "thread/goal/set",
+                    json!({"threadId": thread_id, "status": if args == "pause" { "paused" } else { "active" }}),
+                ))),
+                "clear" | "stop" => Ok(Some(("thread/goal/clear", json!({"threadId": thread_id})))),
+                _ => {
+                    let (objective, token_budget) = if let Some(rest) = args
+                        .strip_prefix("--budget ")
+                        .or_else(|| args.strip_prefix("--token-budget "))
+                    {
+                        let (amount, objective) =
+                            rest.split_once(char::is_whitespace).ok_or_else(|| {
+                                HarnessError::Protocol(
+                                    "Usage: /goal [--budget <tokens>] <objective>".into(),
+                                )
+                            })?;
+                        let budget = amount
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|budget| *budget > 0)
+                            .ok_or_else(|| {
+                                HarnessError::Protocol(
+                                    "/goal budget must be a positive integer".into(),
+                                )
+                            })?;
+                        (objective.trim(), Some(budget))
+                    } else {
+                        (args, None)
+                    };
+                    if objective.is_empty() || objective.starts_with("--") {
+                        return Err(HarnessError::Protocol(
+                            "Usage: /goal [--budget <tokens>] <objective>".into(),
+                        ));
+                    }
+                    Ok(Some((
+                        "thread/goal/set",
+                        json!({"threadId": thread_id, "objective": objective, "status": "active", "tokenBudget": token_budget}),
+                    )))
+                }
+            }
+        }
         "compact" if args.is_empty() => Ok(Some((
             "thread/compact/start",
             json!({"threadId": thread_id}),
@@ -893,20 +946,38 @@ fn command_request(
                     else { json!({"type":"custom", "instructions":args}) },
             }),
         ))),
-        // Known client commands need explicit UI mappings. Do not silently
-        // send those to the model; unknown slash tokens and paths stay literal.
-        "model" | "permissions" | "approvals" | "new" | "clear" | "resume" | "fork" | "status"
-        | "diff" | "mention" | "mcp" | "skills" | "plan" | "fast" | "logout" | "quit" | "exit"
-        | "init" | "rename" | "feedback" | "ps" | "stop" | "clean" | "archive" | "delete" => {
+        // Codex terminal commands are client actions, not app-server slash
+        // operations. Never let a known command become an ordinary model turn.
+        "model" | "ide" | "permissions" | "approvals" | "keymap" | "vim"
+        | "setup-default-sandbox" | "experimental" | "approve" | "memories" | "skills"
+        | "import" | "hooks" | "rename" | "new" | "archive" | "delete" | "clear"
+        | "resume" | "fork" | "worktree" | "app" | "init" | "recap" | "plan" | "voice"
+        | "agents" | "side" | "btw" | "copy" | "export" | "raw" | "tui" | "diff"
+        | "mention" | "status" | "daemon" | "warnings" | "cd" | "pwd" | "cwd"
+        | "usage" | "debug-config" | "title" | "statusline" | "theme" | "pets"
+        | "pet" | "mcp" | "apps" | "plugins" | "logout" | "quit" | "exit"
+        | "feedback" | "rollout" | "ps" | "stop" | "clean" | "test-approval"
+        | "subagents" | "debug-m-drop" | "debug-m-update" => {
             Err(HarnessError::Protocol(format!(
-                "/{name} is not mapped in Zeron's Codex integration. Available commands: /compact and /review."
+                "/{name} is a Codex terminal command, not an app-server command. JJzeron provides /compact, /review, and /goal through Codex RPC; use a JJzeron control for other actions when available."
             )))
         }
+        "fast" => Err(HarnessError::Protocol(
+            "/fast is not a Codex 0.156.1 slash command; choose the service tier in JJzeron's model controls".into(),
+        )),
         _ => Ok(None),
     }
 }
 
-async fn start_turn(client: &RpcClient, params: Value) -> Result<String, HarnessError> {
+enum StartedCommand {
+    Turn(String),
+    Goal {
+        goal: Option<Value>,
+        starts_turn: bool,
+    },
+}
+
+async fn start_turn(client: &RpcClient, params: Value) -> Result<StartedCommand, HarnessError> {
     let text = params
         .pointer("/input/0/text")
         .and_then(Value::as_str)
@@ -923,12 +994,75 @@ async fn start_turn(client: &RpcClient, params: Value) -> Result<String, Harness
         ));
     }
     let (method, params) = native.unwrap_or(("turn/start", params));
+    let goal_starts_turn = method == "thread/goal/set"
+        && (params.get("objective").is_some() || params["status"] == "active");
     let started = client.request(method, params).await?;
-    Ok(started["turn"]["id"].as_str().unwrap_or("").to_owned())
+    let goal = match method {
+        "thread/goal/get" | "thread/goal/set" => Some(
+            started
+                .get("goal")
+                .filter(|goal| method == "thread/goal/get" || goal.is_object())
+                .ok_or_else(|| HarnessError::Protocol(format!("{method}: missing goal response")))?
+                .as_object()
+                .map(|_| started["goal"].clone()),
+        ),
+        "thread/goal/clear" => {
+            if started["cleared"] != true {
+                return Err(HarnessError::Protocol(
+                    "thread/goal/clear: goal was not cleared".into(),
+                ));
+            }
+            Some(None)
+        }
+        _ => None,
+    };
+    if let Some(goal) = goal {
+        Ok(StartedCommand::Goal {
+            starts_turn: goal_starts_turn
+                && goal.as_ref().is_some_and(|goal| goal["status"] == "active"),
+            goal,
+        })
+    } else {
+        Ok(StartedCommand::Turn(
+            started["turn"]["id"].as_str().unwrap_or("").to_owned(),
+        ))
+    }
 }
 
 /// The per-run event loop: one task multiplexing app-server messages, the
 /// steering mailbox, the interrupt token, and consumer liveness.
+async fn forward_rollout_images(
+    tail: &mut Option<tool_images::RolloutImages>,
+    nested_images: &mut HashSet<[u8; 32]>,
+    tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+) -> bool {
+    let Some(reader) = tail.as_mut() else {
+        return true;
+    };
+    let events = match reader.poll() {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(target: "zeron_harness::codex", "tool image stream unavailable: {error}");
+            *tail = None;
+            vec![AgentEvent::Error {
+                message: "Codex tool image stream unavailable".into(),
+            }]
+        }
+    };
+    for event in events {
+        if let AgentEvent::InlineImage { data, .. } = &event {
+            let fingerprint: [u8; 32] = Sha256::digest(data.as_bytes()).into();
+            if nested_images.remove(&fingerprint) {
+                continue;
+            }
+        }
+        if !send(tx, event).await {
+            return false;
+        }
+    }
+    true
+}
+
 async fn run_session(session: Session) {
     let Session {
         title_only,
@@ -1069,9 +1203,10 @@ async fn run_session(session: Session) {
         let thread_id = thread["thread"]["id"].as_str().unwrap_or("").to_owned();
         let mut children = subagents::Subagents::new(thread_id.clone());
         children.restore(&thread["thread"]);
-        Ok::<_, HarnessError>((thread_id, children))
+        let rollout_path = thread["thread"]["path"].as_str().map(str::to_owned);
+        Ok::<_, HarnessError>((thread_id, children, rollout_path))
     };
-    let (thread_id, mut children) = tokio::select! {
+    let (thread_id, mut children, rollout_path) = tokio::select! {
         res = setup => match res {
             Ok(thread_id) => thread_id,
             Err(e) => {
@@ -1145,22 +1280,82 @@ async fn run_session(session: Session) {
         return;
     }
 
-    let mut router = TurnRouter::default();
-    match start_turn(&client, turn_params(&request.prompt)).await {
-        Ok(id) => router.adopt_started(id),
-        Err(e) => {
-            let _ = event_tx
-                .send(Ok(AgentEvent::Done {
-                    status: DoneStatus::Errored,
-                    result: None,
-                    error: Some(e.to_string()),
-                    session_id: Some(thread_id.clone()),
-                }))
-                .await;
-            shutdown_child(&mut child, kill_grace).await;
-            return;
-        }
+    // Older app-server builds may not expose goals. Discovery is best-effort;
+    // an explicit user action below still reports its native error.
+    if let Ok(Ok(state)) = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.request("thread/goal/get", json!({ "threadId": thread_id })),
+    )
+    .await
+        && !send(
+            &event_tx,
+            AgentEvent::GoalUpdate {
+                harness: HarnessId::Codex,
+                goal: state.get("goal").filter(|goal| !goal.is_null()).cloned(),
+            },
+        )
+        .await
+    {
+        shutdown_child(&mut child, kill_grace).await;
+        return;
     }
+
+    let mut router = TurnRouter::default();
+    let (initial_done, initial_native) =
+        match start_turn(&client, turn_params(&request.prompt)).await {
+            Ok(StartedCommand::Turn(id)) => {
+                router.adopt_started(id);
+                (
+                    false,
+                    command_request(&request.prompt, &thread_id)
+                        .ok()
+                        .flatten()
+                        .is_some(),
+                )
+            }
+            Ok(StartedCommand::Goal { goal, starts_turn }) => {
+                if !send(
+                    &event_tx,
+                    AgentEvent::GoalUpdate {
+                        harness: HarnessId::Codex,
+                        goal,
+                    },
+                )
+                .await
+                {
+                    shutdown_child(&mut child, kill_grace).await;
+                    return;
+                }
+                if !starts_turn
+                    && !send(
+                        &event_tx,
+                        AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            result: None,
+                            error: None,
+                            session_id: Some(thread_id.clone()),
+                        },
+                    )
+                    .await
+                {
+                    shutdown_child(&mut child, kill_grace).await;
+                    return;
+                }
+                (!starts_turn, false)
+            }
+            Err(e) => {
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Errored,
+                        result: None,
+                        error: Some(e.to_string()),
+                        session_id: Some(thread_id.clone()),
+                    }))
+                    .await;
+                shutdown_child(&mut child, kill_grace).await;
+                return;
+            }
+        };
 
     // ---- main loop --------------------------------------------------------
     // Deltas seen per agent-message item, so a model that never streams
@@ -1176,16 +1371,26 @@ async fn run_session(session: Session) {
     let mut interrupted = false;
     let mut interrupt_sent = false;
     // A Done has been emitted for the turn currently/last in flight.
-    let mut done_current = false;
-    let mut current_native = command_request(&request.prompt, &thread_id)
-        .ok()
-        .flatten()
-        .is_some();
+    let mut done_current = initial_done;
+    let mut current_native = initial_native;
     let mut done_after_interrupt = false;
     let mut escalation: Option<tokio::task::JoinHandle<()>> = None;
+    let mut image_tail = rollout_path
+        .as_deref()
+        .and_then(|path| tool_images::RolloutImages::new(path, request.resume.is_some()));
+    let mut image_tick = tokio::time::interval(Duration::from_millis(300));
+    image_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // ponytail: native nested/outer caller IDs are not linked on this wire;
+    // replace content matching with caller IDs when Codex exposes that link.
+    let mut nested_images = HashSet::new();
 
     'main: loop {
         tokio::select! {
+            _ = image_tick.tick(), if image_tail.is_some() => {
+                if !forward_rollout_images(&mut image_tail, &mut nested_images, &event_tx).await {
+                    break 'main;
+                }
+            }
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
                 // Foreign-thread traffic FIRST: a child thread's turn/thread
@@ -1195,6 +1400,9 @@ async fn run_session(session: Session) {
                     && !nthread.is_empty()
                     && nthread != thread_id
                 {
+                    if matches!(method.as_str(), "thread/goal/updated" | "thread/goal/cleared") {
+                        continue;
+                    }
                     match route_child_notification(&method) {
                         ChildRoute::Parent => {
                             // Unknown/parent-owned: fall through so a codex
@@ -1213,7 +1421,25 @@ async fn run_session(session: Session) {
                     }
                 }
                 match method.as_str() {
-                    "turn/started" => router.note_started(turn_id(&params)),
+                    "thread/goal/updated" => {
+                        if let Some(goal) = params.get("goal").filter(|goal| !goal.is_null())
+                            && !send(&event_tx, AgentEvent::GoalUpdate {
+                                harness: HarnessId::Codex,
+                                goal: Some(goal.clone()),
+                            }).await
+                        { break 'main; }
+                    }
+                    "thread/goal/cleared" => {
+                        if !send(&event_tx, AgentEvent::GoalUpdate {
+                            harness: HarnessId::Codex,
+                            goal: None,
+                        }).await
+                        { break 'main; }
+                    }
+                    "turn/started" => {
+                        nested_images.clear();
+                        router.note_started(turn_id(&params));
+                    }
 
                     "item/agentMessage/delta" => {
                         streamed_text.insert(item_id(&params));
@@ -1297,6 +1523,9 @@ async fn run_session(session: Session) {
                             }
                         } else {
                             for ev in children.parent_item(phase, item) {
+                                if let AgentEvent::InlineImage { data, .. } = &ev {
+                                    nested_images.insert(Sha256::digest(data.as_bytes()).into());
+                                }
                                 if !send(&event_tx, ev).await {
                                     break 'main;
                                 }
@@ -1313,6 +1542,9 @@ async fn run_session(session: Session) {
                     }
 
                     "turn/completed" => {
+                        if !forward_rollout_images(&mut image_tail, &mut nested_images, &event_tx).await {
+                            break 'main;
+                        }
                         let id = turn_id(&params);
                         router.note_completed(&id);
                         // Item ids never span turns; without this the set grew
@@ -1359,7 +1591,7 @@ async fn run_session(session: Session) {
                         // this turn's end becomes the next turn now; otherwise
                         // stay alive for the mailbox — the caller owns teardown.
                         current_native = false;
-                        if let Some(text) = queued_steers.pop_front() {
+                        while let Some(text) = queued_steers.pop_front() {
                             current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                             if !steer_as_new_turn(
                                 &client,
@@ -1368,17 +1600,26 @@ async fn run_session(session: Session) {
                                 &event_tx,
                                 &mut assistant_message_id,
                                 &mut done_current,
+                                &mut current_native,
                             )
                             .await
                             {
                                 break 'main;
                             }
-                        } else if !steering_open {
+                            if !done_current {
+                                break;
+                            }
+                            current_native = false;
+                        }
+                        if !steering_open && done_current {
                             break 'main;
                         }
                     }
 
                     "turn/failed" => {
+                        if !forward_rollout_images(&mut image_tail, &mut nested_images, &event_tx).await {
+                            break 'main;
+                        }
                         router.note_completed(&turn_id(&params));
                         if let Some(usage) = pending_usage.take()
                             && !send(&event_tx, usage).await
@@ -1410,6 +1651,9 @@ async fn run_session(session: Session) {
                     }
 
                     "turn/aborted" => {
+                        if !forward_rollout_images(&mut image_tail, &mut nested_images, &event_tx).await {
+                            break 'main;
+                        }
                         router.note_completed(&turn_id(&params));
                         done_current = true;
                         if interrupted {
@@ -1465,6 +1709,29 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    if msg.message_id.is_none()
+                        && matches!(msg.prompt.as_str(), "/goal pause" | "/goal resume" | "/goal clear")
+                    {
+                        let (method, params) = match msg.prompt.as_str() {
+                            "/goal pause" => ("thread/goal/set", json!({ "threadId": thread_id, "status": "paused" })),
+                            "/goal resume" => ("thread/goal/set", json!({ "threadId": thread_id, "status": "active" })),
+                            _ => ("thread/goal/clear", json!({ "threadId": thread_id })),
+                        };
+                        let event = match client.request(method, params).await {
+                            Ok(result) if method == "thread/goal/clear" && result["cleared"] == true => AgentEvent::GoalUpdate {
+                                harness: HarnessId::Codex,
+                                goal: None,
+                            },
+                            Ok(result) if method == "thread/goal/set" && result.get("goal").is_some_and(Value::is_object) => AgentEvent::GoalUpdate {
+                                harness: HarnessId::Codex,
+                                goal: result.get("goal").cloned(),
+                            },
+                            Ok(result) => AgentEvent::Error { message: format!("{method}: unexpected response: {result}") },
+                            Err(error) => AgentEvent::Error { message: error.to_string() },
+                        };
+                        if !send(&event_tx, event).await { break 'main; }
+                        continue 'main;
+                    }
                     let text = msg.prompt;
                     // Native operations run at a turn boundary, never as text
                     // injected into an already running model turn. Later messages
@@ -1514,7 +1781,7 @@ async fn run_session(session: Session) {
                                     current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                                     if !steer_as_new_turn(
                                         &client, turn_params(&text), &mut router, &event_tx,
-                                        &mut assistant_message_id, &mut done_current,
+                                        &mut assistant_message_id, &mut done_current, &mut current_native,
                                     ).await { break 'main; }
                                 }
                             }
@@ -1523,7 +1790,7 @@ async fn run_session(session: Session) {
                         current_native = command_request(&text, &thread_id).ok().flatten().is_some();
                         if !steer_as_new_turn(
                             &client, turn_params(&text), &mut router, &event_tx,
-                            &mut assistant_message_id, &mut done_current,
+                            &mut assistant_message_id, &mut done_current, &mut current_native,
                         ).await { break 'main; }
                     }
                 }
@@ -1624,9 +1891,11 @@ async fn steer_as_new_turn(
     event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
     assistant_message_id: &mut String,
     done_current: &mut bool,
+    current_native: &mut bool,
 ) -> bool {
+    let thread_id = params["threadId"].as_str().map(str::to_owned);
     match start_turn(client, params).await {
-        Ok(id) => {
+        Ok(StartedCommand::Turn(id)) => {
             router.adopt_started(id);
             *done_current = false;
             let (prev, next) = rotate(assistant_message_id);
@@ -1638,6 +1907,38 @@ async fn steer_as_new_turn(
                 },
             )
             .await
+        }
+        Ok(StartedCommand::Goal { goal, starts_turn }) => {
+            *done_current = !starts_turn;
+            *current_native = false;
+            let (prev, next) = rotate(assistant_message_id);
+            send(
+                event_tx,
+                AgentEvent::GoalUpdate {
+                    harness: HarnessId::Codex,
+                    goal,
+                },
+            )
+            .await
+                && send(
+                    event_tx,
+                    AgentEvent::Steered {
+                        assistant_message_id: Some(prev),
+                        next_assistant_message_id: Some(next),
+                    },
+                )
+                .await
+                && (starts_turn
+                    || send(
+                        event_tx,
+                        AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            result: None,
+                            error: None,
+                            session_id: thread_id,
+                        },
+                    )
+                    .await)
         }
         Err(e) => {
             let _ = send(
@@ -2052,7 +2353,9 @@ mod skill_discovery_tests {
         assert!(command_request("/tmp/file.rs", "t").unwrap().is_none());
         assert!(command_request("/tmp", "t").unwrap().is_none());
         assert!(command_request("/compact extra", "t").is_err());
-        assert!(command_request("/model", "t").is_err());
+        for terminal_command in ["/model", "/pwd", "/subagents", "/apps", "/debug-m-update"] {
+            assert!(command_request(terminal_command, "t").is_err());
+        }
         let (method, params) = command_request("/review check errors", "t")
             .unwrap()
             .unwrap();

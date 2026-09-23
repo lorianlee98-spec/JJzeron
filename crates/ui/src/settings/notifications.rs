@@ -364,7 +364,7 @@ impl Render for NotificationsPage {
                                 vec![
                                     div()
                                         .child(SharedString::from(
-                                            "Skip the banner while a Zeron window is focused.",
+                                            "Skip the banner while a JJzeron window is focused.",
                                         ))
                                         .into_any_element(),
                                 ],
@@ -373,7 +373,7 @@ impl Render for NotificationsPage {
                     .child(
                         toggle(
                             "notifications-background-toggle",
-                            "Only notify when Zeron is in the background",
+                            "Only notify when JJzeron is in the background",
                             background_only,
                             desktop,
                         )

@@ -4967,27 +4967,27 @@ impl WorkspaceCommand {
             (
                 Self::Model,
                 "model",
-                "Zeron: choose agent, model, and reasoning",
+                "JJzeron: choose agent, model, and reasoning",
                 false,
             ),
-            (Self::New, "new", "Zeron: start a new conversation", false),
+            (Self::New, "new", "JJzeron: start a new conversation", false),
             (
                 Self::Resume,
                 "resume",
-                "Zeron: search and open conversations",
+                "JJzeron: search and open conversations",
                 false,
             ),
-            (Self::Settings, "settings", "Zeron: open settings", false),
-            (Self::Diff, "diff", "Zeron: open changes", true),
-            (Self::Files, "files", "Zeron: open project files", true),
-            (Self::Terminal, "terminal", "Zeron: open a terminal", true),
+            (Self::Settings, "settings", "JJzeron: open settings", false),
+            (Self::Diff, "diff", "JJzeron: open changes", true),
+            (Self::Files, "files", "JJzeron: open project files", true),
+            (Self::Terminal, "terminal", "JJzeron: open a terminal", true),
             (
                 Self::Rename,
                 "rename",
-                "Zeron: rename this conversation",
+                "JJzeron: rename this conversation",
                 true,
             ),
-            (Self::Stop, "stop", "Zeron: stop the active run", true),
+            (Self::Stop, "stop", "JJzeron: stop the active run", true),
         ]
     }
 }
@@ -5001,11 +5001,11 @@ fn with_workspace_commands(
         if needs_chat && !in_chat {
             continue;
         }
-        // Keep provider commands intact. Explicit Zeron names remain available
+        // Keep provider commands intact. Explicit JJzeron names remain available
         // when a provider owns the unqualified name.
         let mut name = name.to_string();
         while rows.iter().any(|row| row.name == name) {
-            name = format!("zeron:{name}");
+            name = format!("jjzeron:{name}");
         }
         rows.push(InvocationCandidate {
             invocation: zeron_proto::invocation::Invocation::Command { name: name.clone() },
@@ -5116,7 +5116,7 @@ fn mention_response_is_current(state: &FileMentionState, request: u64) -> bool {
 fn mention_error_message(err: &RpcError) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
-            "The session's device runs an older zeron — update it to search its files".into()
+            "The session's device runs an older JJzeron — update it to search its files".into()
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
         RpcError::BadParams(_) | RpcError::Failed(_) => "File search failed".into(),
@@ -5218,9 +5218,9 @@ fn slash_error_message(err: &RpcError, skill: bool) -> SharedString {
     match err {
         RpcError::UnknownMethod(_) => {
             if skill {
-                "Skills require an updated engine on the selected device. Restart that device’s Zeron after updating.".into()
+                "Skills require an updated engine on the selected device. Restart that device’s JJzeron after updating.".into()
             } else {
-                "Commands require an updated engine on the selected device. Restart that device’s Zeron after updating.".into()
+                "Commands require an updated engine on the selected device. Restart that device’s JJzeron after updating.".into()
             }
         }
         RpcError::Transport(_) | RpcError::Closed => "The session's device is unreachable".into(),
@@ -7399,7 +7399,7 @@ impl Composer {
     /// Check before consuming drafts, attachments, or an edited queue row.
     pub(crate) fn check_reference_delivery(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         if references_require_update(text, self.reference_delivery_supported(cx)) {
-            self.failure = Some("Update the selected device’s Zeron to send file, command, or skill references. Your draft is preserved.".into());
+            self.failure = Some("Update the selected device’s JJzeron to send file, command, or skill references. Your draft is preserved.".into());
             self.failure_key = Some(self.current_key.clone());
             cx.notify();
             return false;
@@ -7969,7 +7969,7 @@ impl Composer {
                         }
                         crate::pickers::CheckoutPlan::NewWorktree { base } => {
                             // Footer shows the base until the host stamps the
-                            // actual zeron/<name> branch post-creation. cwd
+                            // actual jjzeron/<name> branch post-creation. cwd
                             // stays the repo folder — an old host that doesn't
                             // know the spec degrades to the main checkout
                             // instead of failing the run.
@@ -10231,7 +10231,7 @@ mod tests {
                     input_hint: Some("model id".into()),
                 },
                 SlashCommand {
-                    name: "zeron:model".into(),
+                    name: "jjzeron:model".into(),
                     description: "Plugin command".into(),
                     input_hint: None,
                 },
@@ -10243,9 +10243,9 @@ mod tests {
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
-        assert_eq!(workspace_command_for_text("/zeron:model", &rows), None);
+        assert_eq!(workspace_command_for_text("/jjzeron:model", &rows), None);
         assert_eq!(
-            workspace_command_for_text("/zeron:zeron:model", &rows),
+            workspace_command_for_text("/jjzeron:jjzeron:model", &rows),
             Some(WorkspaceCommand::Model)
         );
         assert_eq!(with_workspace_commands(rows, true).len(), 11);

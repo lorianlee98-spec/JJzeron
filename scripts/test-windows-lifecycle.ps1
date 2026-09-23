@@ -1,7 +1,7 @@
 # Native GUI regression: close the real window, require a clean process exit,
 # then reopen the same isolated profile. No real account/provider data is used.
 param(
-    [string]$Exe = (Join-Path $PSScriptRoot '../target/release/zeron.exe'),
+    [string]$Exe = (Join-Path $PSScriptRoot '../target/release/jjzeron.exe'),
     [int]$Runs = 2
 )
 $ErrorActionPreference = 'Stop'
@@ -30,7 +30,7 @@ $overrides = @{
     HOME = $root; USERPROFILE = $root
     LOCALAPPDATA = (Join-Path $root 'AppData/Local')
     APPDATA = (Join-Path $root 'AppData/Roaming')
-    ZERON_DATA_DIR = (Join-Path $root 'Zeron')
+    ZERON_DATA_DIR = (Join-Path $root 'JJzeron')
     ZERON_EDGE_TOKEN = $null; ZERON_IPC_PORT = '0'
     ZERON_EDGE_URL = 'http://127.0.0.1:1'; ZERON_ORG_ID = $null
     ZERON_HARNESS = 'mock'; RUST_BACKTRACE = '1'

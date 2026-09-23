@@ -1505,6 +1505,9 @@ pub struct Shell {
     right_terminal: Option<Entity<TerminalPanel>>,
     /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
     right_plus: popover::Popup<()>,
+    activity_menu: popover::Popup<(String, &'static str)>,
+    goal_action_pending: bool,
+    activity_focus: std::collections::HashMap<String, FocusHandle>,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -1926,6 +1929,9 @@ impl Shell {
             terminal: None,
             right_terminal: None,
             right_plus: popover::Popup::default(),
+            activity_menu: popover::Popup::default(),
+            goal_action_pending: false,
+            activity_focus: std::collections::HashMap::new(),
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -2312,7 +2318,7 @@ impl Shell {
                 {
                     let body = match connectivity {
                         zeron_proto::ConnectivityState::Offline => "Your device is offline",
-                        _ => "Zeron is trying to reconnect",
+                        _ => "JJzeron is trying to reconnect",
                     };
                     crate::notify::post("Connection unavailable", body, None);
                 }
@@ -3781,7 +3787,7 @@ impl Shell {
         };
         if let Some(link) = link {
             cx.write_to_clipboard(ClipboardItem::new_string(link));
-            self.sidebar_notice = Some("Zeron conversation link copied".into());
+            self.sidebar_notice = Some("JJzeron conversation link copied".into());
         } else {
             self.sidebar_notice = Some("Conversation link is not ready yet".into());
         }
@@ -4869,7 +4875,7 @@ impl Shell {
                     },
                     Err(err) => {
                         shell.runtime_change_error = Some(format!(
-                            "Could not stop the remote engine: {err}. Run `zeron daemon stop`, then quit and reopen Zeron."
+                            "Could not stop the remote engine: {err}. Run `jjzeron daemon stop`, then quit and reopen JJzeron."
                         ).into());
                         cx.notify();
                     }
@@ -7052,7 +7058,7 @@ impl Shell {
     /// UpdateStatus stream reports a newer release. On a macOS bundle install
     /// it drives the whole flow — click to download, then click to restart into
     /// the staged bundle. Elsewhere (managed/source installs) it is advisory
-    /// (`zeron update`); click dismisses it for that version.
+    /// (`jjzeron update`); click dismisses it for that version.
     fn render_update_strip(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.state.read(cx).update.clone()?;
         if !status.update_available {
@@ -7073,7 +7079,7 @@ impl Shell {
             }
         } else {
             (
-                format!("Update available — v{latest} · run `zeron update`").into(),
+                format!("Update available — v{latest} · run `jjzeron update`").into(),
                 true,
             )
         };
@@ -7378,7 +7384,7 @@ impl Shell {
         } else if remote_engine {
             "Stop daemon and quit"
         } else {
-            "Quit Zeron"
+            "Quit JJzeron"
         };
 
         if self.sync_flow == SyncFlow::Enabling && needs_org {
@@ -7403,7 +7409,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Finish signing in in your browser. Zeron will keep using this local workspace until you quit and reopen.",
+                        "Finish signing in in your browser. JJzeron will keep using this local workspace until you quit and reopen.",
                     )),
                 )
                 .child(
@@ -7447,14 +7453,14 @@ impl Shell {
                     )
                     .into(),
                     (Some(email), None) => format!(
-                        "You're signed in as {email}. Zeron can switch to your synced workspace now."
+                        "You're signed in as {email}. JJzeron can switch to your synced workspace now."
                     )
                     .into(),
                     (None, Some(phrase)) => format!(
                         "Bring {phrase} from this device into your synced workspace, or start it fresh."
                     )
                     .into(),
-                    (None, None) => "Zeron can switch to your synced workspace now.".into(),
+                    (None, None) => "JJzeron can switch to your synced workspace now.".into(),
                 };
                 let mut actions = div()
                     .mt(px(16.0))
@@ -7643,9 +7649,9 @@ impl Shell {
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
                         if remote_engine {
-                            "Zeron is using a background daemon. Stop it and quit Zeron, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "JJzeron is using a background daemon. Stop it and quit JJzeron, then reopen to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         } else {
-                            "Quit and reopen Zeron to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
+                            "Quit and reopen JJzeron to start the synced workspace. Existing local sessions stay on this device and will not be uploaded."
                         },
                     )),
                 )
@@ -7690,7 +7696,7 @@ impl Shell {
                 .child(
                     div().mt(px(6.0)).child(popover::dialog_body(
                         &theme,
-                        "Zeron will remove your credentials, close the synced workspace, and continue in local mode.",
+                        "JJzeron will remove your credentials, close the synced workspace, and continue in local mode.",
                     )),
                 )
                 .child(
@@ -7823,6 +7829,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.key == "escape" && self.activity_menu.is_open() {
+            self.close_activity_menu(cx);
+            cx.stop_propagation();
+            return;
+        }
         // Inputs and completion menus consume Tab first. Unhandled Tab walks
         // accessible controls, including individual transcript link ranges.
         let modifiers = event.keystroke.modifiers;
@@ -8005,7 +8016,7 @@ impl Shell {
                                     .size(px(16.0))
                                     .text_color(theme.text_muted),
                             )
-                            .child(SharedString::from("Zeron conversation link")),
+                            .child(SharedString::from("JJzeron conversation link")),
                     )
                     .when_some(harness_link, |menu, link| {
                         menu.child(
@@ -8864,6 +8875,175 @@ impl Shell {
         let Some(chat_id) = state.selected_chat.clone() else {
             return strip.into_any_element();
         };
+        let mut agents = Vec::new();
+        let mut commands = Vec::new();
+        for entry in &state.transcript {
+            for part in &entry.parts {
+                if let zeron_doc::MessagePart::Tool {
+                    call,
+                    resolved,
+                    subagent_ref,
+                    subagent_status,
+                    subagent_tail,
+                    ..
+                } = part
+                {
+                    if call.is_subagent_spawn()
+                        && matches!(subagent_status, Some(zeron_doc::SubagentStatus::Running))
+                    {
+                        if let Some(doc) = subagent_ref {
+                            if !agents.iter().any(|(id, _, _)| id == doc) {
+                                agents.push((
+                                    doc.clone(),
+                                    transcript::subagent_tab_title(call),
+                                    subagent_tail.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    if !resolved && entry.status == Some(zeron_doc::MessageStatus::Streaming) {
+                        if let zeron_proto::ToolCall::Exec { command } = call {
+                            commands.push(command.clone());
+                        }
+                    }
+                }
+            }
+        }
+        let goal = state
+            .active_goal
+            .clone()
+            .filter(|(harness, goal)| match harness {
+                zeron_proto::HarnessId::Prime => {
+                    goal["active"].as_bool() == Some(true) || goal["status"] == "paused"
+                }
+                zeron_proto::HarnessId::Codex => {
+                    !matches!(goal["status"].as_str(), None | Some("complete"))
+                }
+                _ => false,
+            });
+        if !agents.is_empty() || !commands.is_empty() || goal.is_some() {
+            let mut capsules = strip;
+            if !commands.is_empty() {
+                let menu = popover::popover_card(&theme)
+                    .w(px(320.0))
+                    .child(popover::menu_heading(&theme, "Running commands"))
+                    .children(
+                        commands
+                            .iter()
+                            .map(|command| div().px(px(10.0)).py(px(6.0)).child(command.clone())),
+                    );
+                capsules = capsules.child(self.activity_capsule(
+                    &chat_id,
+                    "commands",
+                    format!("{} commands", commands.len()),
+                    menu.into_any_element(),
+                    cx,
+                ));
+            }
+            if !agents.is_empty() {
+                let mut menu = popover::popover_card(&theme)
+                    .w(px(340.0))
+                    .child(popover::menu_heading(&theme, "Subagents"));
+                for (doc_id, title, tail) in &agents {
+                    let (chat, doc, title) = (chat_id.clone(), doc_id.clone(), title.clone());
+                    let row_title = title.clone();
+                    let row = popover::menu_row(&theme, false, format!("activity-agent-{doc}"))
+                        .flex_col()
+                        .gap(px(3.0))
+                        .items_start()
+                        .child(row_title)
+                        .child(
+                            div()
+                                .text_color(theme.text_muted)
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .max_w(px(310.0))
+                                .truncate()
+                                .child(
+                                    tail.clone()
+                                        .filter(|s| !s.is_empty())
+                                        .map(|tail| format!("Running · {tail}"))
+                                        .unwrap_or_else(|| "Running".into()),
+                                ),
+                        );
+                    menu = menu.child(self.activity_button(
+                        format!("activity-agent-{doc}"),
+                        row,
+                        move |this, cx| {
+                            this.close_activity_menu(cx);
+                            this.add_subagent_surface(
+                                chat.clone(),
+                                doc.clone(),
+                                title.to_string(),
+                                false,
+                                cx,
+                            );
+                        },
+                        cx,
+                    ));
+                }
+                capsules = capsules.child(self.activity_capsule(
+                    &chat_id,
+                    "agents",
+                    format!("{} agents", agents.len()),
+                    menu.into_any_element(),
+                    cx,
+                ));
+            }
+            if let Some((harness, goal)) = goal {
+                let status = goal["status"].as_str().unwrap_or("active");
+                let (capsule_label, status_label) = match status {
+                    "paused" => ("Goal paused", "Paused"),
+                    "blocked" => ("Goal blocked", "Blocked"),
+                    "usageLimited" => ("Goal usage limit", "Usage limit reached"),
+                    "budgetLimited" | "budget_limited" => ("Goal budget reached", "Budget reached"),
+                    _ => ("Goal active", "Active"),
+                };
+                let mut menu = popover::popover_card(&theme)
+                    .w(px(340.0))
+                    .child(popover::menu_heading(&theme, "Goal"))
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .child(goal["objective"].as_str().unwrap_or("").to_owned()),
+                    )
+                    .child(
+                        div()
+                            .px(px(10.0))
+                            .text_color(theme.text_muted)
+                            .child(status_label),
+                    );
+                let actions = match status {
+                    "active" => vec![("pause", "Pause"), ("clear", "Stop goal")],
+                    "paused" => vec![("resume", "Resume"), ("clear", "Stop goal")],
+                    _ => vec![("clear", "Stop goal")],
+                };
+                for (action, label) in actions {
+                    let chat = chat_id.clone();
+                    let row = popover::menu_row(&theme, false, format!("goal-{action}")).child(
+                        if self.goal_action_pending {
+                            "Updating…"
+                        } else {
+                            label
+                        },
+                    );
+                    menu = menu.child(self.activity_button(
+                        format!("goal-{action}"),
+                        row,
+                        move |this, cx| this.act_on_goal(chat.clone(), harness, action, cx),
+                        cx,
+                    ));
+                }
+                capsules = capsules.child(self.activity_capsule(
+                    &chat_id,
+                    "goal",
+                    capsule_label.to_owned(),
+                    menu.into_any_element(),
+                    cx,
+                ));
+            }
+            return capsules.into_any_element();
+        }
         let indicator = state.indicator_for(&chat_id, now);
         // Timer base: the freshest of the session row's turn start and the
         // in-flight send. During the send→ack window the row (if any) still
@@ -8912,6 +9092,157 @@ impl Shell {
                 .into_any_element(),
             Indicator::None => strip.into_any_element(),
         }
+    }
+
+    fn close_activity_menu(&mut self, cx: &mut Context<Self>) {
+        if self.activity_menu.begin_close() {
+            popover::reap_popup(cx, |shell: &mut Self| &mut shell.activity_menu);
+            cx.notify();
+        }
+    }
+
+    fn activity_button(
+        &mut self,
+        id: String,
+        row: gpui::Div,
+        action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let focus = self
+            .activity_focus
+            .entry(id.clone())
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
+        let action = std::rc::Rc::new(action);
+        let click = action.clone();
+        let theme = Theme::of(cx).clone();
+        row.id(SharedString::from(id))
+            .track_focus(&focus)
+            .focus_visible(move |row| row.bg(theme.element_hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                click(this, cx);
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    action(this, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .into_any_element()
+    }
+
+    fn activity_capsule(
+        &mut self,
+        chat_id: &str,
+        kind: &'static str,
+        label: String,
+        content: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let chat = chat_id.to_owned();
+        let key = (chat.clone(), kind);
+        let open = self.activity_menu.get() == Some(&key);
+        let focus = self
+            .activity_focus
+            .entry(format!("activity-{kind}"))
+            .or_insert_with(|| cx.focus_handle().tab_stop(true))
+            .clone();
+        let key_chat = chat.clone();
+        let mut chip = div()
+            .id(SharedString::from(format!("activity-{kind}")))
+            .relative()
+            .track_focus(&focus)
+            .focus_visible(|chip| chip.border_color(theme.border_strong))
+            .px(px(9.0))
+            .py(px(2.0))
+            .rounded(px(8.0))
+            .bg(theme.surface)
+            .text_color(theme.text_muted)
+            .border_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, _| {
+                    this.activity_menu
+                        .note_trigger_press_matching(|(_, k)| *k == kind)
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.activity_menu.take_press_was_open() {
+                    this.close_activity_menu(cx);
+                } else {
+                    this.activity_menu.open((chat.clone(), kind));
+                    cx.notify();
+                }
+            }))
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    if this.activity_menu.is_open() {
+                        this.close_activity_menu(cx);
+                    } else {
+                        this.activity_menu.open((key_chat.clone(), kind));
+                        cx.notify();
+                    }
+                    cx.stop_propagation();
+                }
+            }));
+        if open {
+            let menu = div()
+                .id("activity-scroll")
+                .max_h(px(320.0))
+                .overflow_y_scroll()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_activity_menu(cx)))
+                .child(content);
+            chip = chip.child(popover::anchored_menu_above(
+                format!("activity-menu-{kind}"),
+                menu.into_any_element(),
+                self.activity_menu.closing_since(),
+            ));
+        }
+        chip.into_any_element()
+    }
+
+    fn act_on_goal(
+        &mut self,
+        chat_id: String,
+        harness: zeron_proto::HarnessId,
+        action: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.goal_action_pending {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.goal_action_pending = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    if harness == zeron_proto::HarnessId::Prime {
+                        methods::PRIME_GOAL_ACTION
+                    } else {
+                        methods::CODEX_GOAL_ACTION
+                    },
+                    serde_json::json!({"chatId": chat_id, "action": action}),
+                )
+                .await;
+            this.update(cx, |shell, cx| {
+                shell.goal_action_pending = false;
+                if let Err(error) = result {
+                    shell.sidebar_notice = Some(format!("Could not {action} goal: {error}").into());
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Right pane — the surface host (t3code RightPanelTabs): hidden by
@@ -9182,7 +9513,7 @@ impl Shell {
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(
-                        "Zeron removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
+                        "JJzeron removed your credentials but could not finish closing the previous synced workspace. Retry before continuing in local mode.",
                     )),
             )
             .when_some(self.runtime_change_error.clone(), |card, error| {
@@ -9822,7 +10153,7 @@ impl Shell {
                         .text_size(crate::typography::ui_rems(18.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.text)
-                        .child(SharedString::from("Log in to Zeron")),
+                        .child(SharedString::from("Log in to JJzeron")),
                 )
                 .child(
                     div()
@@ -9977,11 +10308,11 @@ impl Shell {
         // then existing memberships and the account escape hatch.
         let blurb: SharedString = match email {
             Some(email) => format!(
-                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
+                "JJzeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
             )
             .into(),
             None => {
-                "Zeron is organized around workspaces — create one for yourself or your team."
+                "JJzeron is organized around workspaces — create one for yourself or your team."
                     .into()
             }
         };

@@ -1,5 +1,5 @@
-//! zeron — headed by default; `zeron headless` runs the engine alone. Both start
-//! local-only without credentials. `zeron login` and `zeron logout` select the
+//! jjzeron — headed by default; `jjzeron headless` runs the engine alone. Both start
+//! local-only without credentials. `jjzeron login` and `jjzeron logout` select the
 //! profile used by the next engine start without mutating a live runtime.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -13,14 +13,14 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "zeron",
+    name = "jjzeron",
     version,
     about = "Multi-device controller for coding agents"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Open a Zeron conversation URL.
+    /// Open a JJzeron conversation URL.
     #[arg(value_name = "URL")]
     open_url: Option<String>,
     #[cfg(windows)]
@@ -44,11 +44,11 @@ enum Command {
     #[cfg(target_os = "linux")]
     /// Trigger an Appshot in the running headed instance (desktop shortcut fallback).
     Appshot,
-    /// Serve the Zeron MCP (Model Context Protocol) server on stdin/stdout,
+    /// Serve the JJzeron MCP (Model Context Protocol) server on stdin/stdout,
     /// proxying to the running engine's IPC. Agents use it to create, read,
     /// and message chats. Logs go to stderr; stdout is the protocol.
     Mcp,
-    /// Manage `zeron headless` as a background service (launchd / systemd --user).
+    /// Manage `jjzeron headless` as a background service (launchd / systemd --user).
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
@@ -157,7 +157,7 @@ fn main() -> anyhow::Result<()> {
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        // `zeron mcp` owns stdout for the protocol: a single log line on it
+        // `jjzeron mcp` owns stdout for the protocol: a single log line on it
         // would corrupt the JSON-RPC stream, so its diagnostics go to stderr.
         if matches!(&cli.command, Some(Command::Mcp)) {
             tracing_subscriber::registry()
@@ -251,7 +251,7 @@ fn main() -> anyhow::Result<()> {
                 ipc_port: std::env::var("ZERON_IPC_PORT")
                     .ok()
                     .and_then(|p| p.parse().ok())
-                    .unwrap_or(27654),
+                    .unwrap_or(27655),
                 edge_url: edge_url_from_env(),
                 workos_client_id: workos_client_id_from_env(&edge_token),
                 edge_token,
@@ -301,7 +301,7 @@ fn engine_config_from_env() -> zeron_engine::EngineConfig {
         ipc_port: std::env::var("ZERON_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
-            .unwrap_or(27654),
+            .unwrap_or(27655),
         default_harness: harness_from_env(),
         // WorkOS mode: the signed-in session's org wins; ZERON_ORG_ID (dev
         // default "dev-org") scopes the workspace room otherwise.
@@ -324,19 +324,22 @@ fn harness_from_env() -> zeron_engine::HarnessId {
         Ok("grok") => zeron_engine::HarnessId::Grok,
         Ok("hermes") => zeron_engine::HarnessId::Hermes,
         Ok("pi") => zeron_engine::HarnessId::Pi,
+        Ok("prime") => zeron_engine::HarnessId::Prime,
         Ok("antigravity") => zeron_engine::HarnessId::Antigravity,
         _ => zeron_engine::HarnessId::ClaudeCode,
     }
 }
 
-/// `zeron sync`: dial the running engine's IPC and print per-room sync state.
+/// `jjzeron sync`: dial the running engine's IPC and print per-room sync state.
 /// The introspection surface every 2026-08 incident was missing — "is this
 /// device's workspace room actually receiving?" as a one-liner.
 async fn sync_cli(ipc_port: u16) -> anyhow::Result<()> {
     let client = zeron_rpc::connect_ws(&format!("ws://127.0.0.1:{ipc_port}"))
         .await
         .map_err(|e| {
-            anyhow::anyhow!("no engine listening on 127.0.0.1:{ipc_port} ({e}) — is zeron running?")
+            anyhow::anyhow!(
+                "no engine listening on 127.0.0.1:{ipc_port} ({e}) — is jjzeron running?"
+            )
         })?;
     let status = client
         .call(zeron_rpc::methods::SYNC_STATUS, serde_json::json!({}))

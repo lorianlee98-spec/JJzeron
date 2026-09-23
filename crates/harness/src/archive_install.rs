@@ -3,7 +3,7 @@
 //! server.
 //!
 //! same contract as the npm installs in [`crate::adapter_install`]: the pinned
-//! archive lands ONCE in `~/.zeron/adapters/<name>/<version>`, extraction runs
+//! archive lands ONCE in `~/.jjzeron/adapters/<name>/<version>`, extraction runs
 //! in a `.tmp-*` sibling that is renamed into place only after the entry
 //! resolves and the marker is written, so a killed download never passes for
 //! a working install.

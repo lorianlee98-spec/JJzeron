@@ -568,6 +568,27 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::pi().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::pi()) as Arc<dyn Harness>)),
     );
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Prime,
+            name: "Prime Agent".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::StepBoundary,
+            reasoning_levels: vec![
+                ReasoningLevel::Minimal,
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+            ],
+            installed: true,
+            can_install: false,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::PrimeHarness::new().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::PrimeHarness::new()) as Arc<dyn Harness>)),
+    );
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
     // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
@@ -692,6 +713,7 @@ mod tests {
                 HarnessId::Grok,
                 HarnessId::Hermes,
                 HarnessId::Pi,
+                HarnessId::Prime,
                 HarnessId::Opencode,
                 HarnessId::Antigravity
             ]
@@ -764,6 +786,21 @@ mod tests {
                 ReasoningLevel::High,
                 ReasoningLevel::XHigh,
                 ReasoningLevel::Max
+            ]
+        );
+        let prime = registry.resolve(HarnessId::Prime).unwrap();
+        assert_eq!(prime.id(), HarnessId::Prime);
+        assert_eq!(prime.display_name(), "Prime Agent");
+        assert_eq!(prime.steering_mode(), SteeringMode::StepBoundary);
+        assert_eq!(
+            prime.reasoning_levels(),
+            &[
+                ReasoningLevel::Minimal,
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
             ]
         );
     }

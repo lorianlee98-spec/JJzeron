@@ -71,7 +71,32 @@ fi
 
 # ---- first turn ------------------------------------------------------------
 read -r turnline || exit 1
+if has "$turnline" '"method":"thread/goal/get"'; then
+  if has "$thread_line" '"model":"goal-fixture"'; then
+    emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":{\"threadId\":\"th-1\",\"objective\":\"Ship capsule\",\"status\":\"active\",\"tokensUsed\":12}}}"
+  else
+    emit "{\"id\":$(rid "$turnline"),\"result\":{\"goal\":null}}"
+  fi
+  read -r turnline || exit 1
+fi
 tid=$(rid "$turnline")
+
+if has "$turnline" '"method":"thread/goal/clear"'; then
+  has "$turnline" '"threadId":"th-resumed"' || exit 1
+  emit "{\"id\":$tid,\"result\":{\"cleared\":true}}"
+  exec sleep 30
+fi
+
+if has "$turnline" '"method":"thread/goal/set"'; then
+  has "$turnline" '"objective":"Verify JJzeron goals"' || exit 1
+  has "$turnline" '"tokenBudget":5000' || exit 1
+  has "$turnline" '"status":"active"' || exit 1
+  emit "{\"id\":$tid,\"result\":{\"goal\":{\"threadId\":\"th-1\",\"objective\":\"Verify JJzeron goals\",\"status\":\"active\",\"tokenBudget\":5000}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"goal-turn"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"goal-message","delta":"Goal work started"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"goal-turn","status":"completed"}}}'
+  exec sleep 30
+fi
 
 if has "$turnline" '"method":"thread/compact/start"'; then
   emit "{\"id\":$tid,\"result\":{}}"
@@ -89,6 +114,42 @@ if has "$turnline" '"method":"review/start"'; then
 fi
 
 case "$turnline" in
+*scenario:steer-child*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-1\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-1"}}}'
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"spawn-alpha","type":"subAgentActivity","kind":"started","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"child-1","itemId":"child-message","delta":"child working "}}'
+  read -r steerline || exit 1
+  sid=$(rid "$steerline")
+  if ! has "$steerline" '"method":"turn/steer"' || ! has "$steerline" 'Redirect while child runs'; then
+    fail_turn "$sid" "child was interrupted instead of steered"
+    exit 0
+  fi
+  emit "{\"id\":$sid,\"result\":{}}"
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"child-1","itemId":"child-message","delta":"and finished"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"child-1","turn":{"id":"ct-1","status":"completed"}}}'
+  emit '{"method":"item/completed","params":{"threadId":"th-1","item":{"id":"spawn-alpha","type":"subAgentActivity","kind":"completed","agentThreadId":"child-1","agentPath":"/root/alpha"}}}'
+  emit '{"method":"item/agentMessage/delta","params":{"threadId":"th-1","itemId":"parent-message","delta":"parent incorporated steer"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-1","status":"completed"}}}'
+  exec sleep 30
+  ;;
+*scenario:goal-control*)
+  emit "{\"id\":$tid,\"result\":{\"turn\":{\"id\":\"t-goal\"}}}"
+  emit '{"method":"turn/started","params":{"threadId":"th-1","turn":{"id":"t-goal"}}}'
+  emit '{"method":"item/started","params":{"threadId":"th-1","item":{"id":"spawn-goal","type":"subAgentActivity","kind":"spawned","agentThreadId":"child-goal","agentPath":"/root/goal"}}}'
+  emit '{"method":"turn/started","params":{"threadId":"child-goal","turn":{"id":"child-turn"}}}'
+  read -r action || exit 1
+  has "$action" '"method":"thread/goal/set"' && has "$action" '"status":"paused"' || { fail_turn "$(rid "$action")" "expected native goal pause"; exit 0; }
+  emit "{\"id\":$(rid "$action"),\"result\":{\"goal\":{\"threadId\":\"th-1\",\"objective\":\"Ship capsule\",\"status\":\"paused\"}}}"
+  emit '{"method":"thread/goal/updated","params":{"threadId":"child-goal","turnId":"child-turn","goal":{"threadId":"child-goal","objective":"Child goal","status":"paused"}}}'
+  emit '{"method":"thread/goal/updated","params":{"threadId":"th-1","turnId":"t-goal","goal":{"threadId":"th-1","objective":"Ship capsule","status":"paused"}}}'
+  read -r action || exit 1
+  has "$action" '"method":"thread/goal/clear"' || { fail_turn "$(rid "$action")" "expected native goal clear"; exit 0; }
+  emit "{\"id\":$(rid "$action"),\"result\":{\"cleared\":true}}"
+  emit '{"method":"thread/goal/cleared","params":{"threadId":"th-1"}}'
+  emit '{"method":"turn/completed","params":{"threadId":"child-goal","turn":{"id":"child-turn","status":"completed"}}}'
+  emit '{"method":"turn/completed","params":{"threadId":"th-1","turn":{"id":"t-goal","status":"completed"}}}'
+  ;;
 *scenario:native-skills*)
   for want in '"type":"skill"' '"path":"/repo/a b/SKILL.md"' '[lib.rs](src/lib.rs)'; do
     has "$turnline" "$want" || { fail_turn "$tid" "initial native skill or file path missing"; exit 0; }

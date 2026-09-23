@@ -321,7 +321,7 @@ pub fn install_new_thread_composer_background(source: &Path, cx: &mut App) -> Re
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to save the image. Restart Zeron and try again.".to_string())?;
+        .ok_or_else(|| "Unable to save the image. Restart JJzeron and try again.".to_string())?;
     let backgrounds_dir = data_dir.join(NEW_THREAD_BACKGROUND_DIR);
     std::fs::create_dir_all(&backgrounds_dir).map_err(|_| {
         "Unable to save the image. Check folder permissions and try again.".to_string()
@@ -374,7 +374,7 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     let data_dir = cx
         .try_global::<SettingsStore>()
         .map(|store| store.data_dir.clone())
-        .ok_or_else(|| "Unable to remove the image. Restart Zeron and try again.".to_string())?;
+        .ok_or_else(|| "Unable to remove the image. Restart JJzeron and try again.".to_string())?;
     let mut next = current(cx);
     let previous = next.new_thread_composer_background.take();
     if previous.is_none() {
@@ -643,7 +643,7 @@ impl SkillCompletionSettings {
     }
 }
 
-pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
+pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 10] = [
     (zeron_proto::HarnessId::Antigravity, "Antigravity"),
     (zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
     (zeron_proto::HarnessId::Codex, "Codex"),
@@ -652,6 +652,7 @@ pub const SKILL_COMPLETION_HARNESSES: [(zeron_proto::HarnessId, &str); 9] = [
     (zeron_proto::HarnessId::Grok, "Grok"),
     (zeron_proto::HarnessId::Hermes, "Hermes"),
     (zeron_proto::HarnessId::Pi, "Pi"),
+    (zeron_proto::HarnessId::Prime, "Prime Agent"),
     (zeron_proto::HarnessId::Opencode, "OpenCode"),
 ];
 

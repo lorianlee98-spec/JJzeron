@@ -91,6 +91,133 @@ async fn run_to_end(
 }
 
 #[tokio::test]
+async fn goal_controls_keep_parent_and_child_turns_running() {
+    let (controls, steer, _token) = controls("Yes");
+    let mut req = request("scenario:goal-control");
+    req.model = Some("goal-fixture".into());
+    let mut stream = harness().run(req, controls).await.unwrap();
+    let mut events = Vec::new();
+    let mut sent_pause = false;
+    let mut sent_clear = false;
+    let mut steer = Some(steer);
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("goal fixture stalled")
+    {
+        let event = item.unwrap();
+        if let AgentEvent::GoalUpdate { goal, .. } = &event {
+            if goal
+                .as_ref()
+                .and_then(|goal| goal.get("status"))
+                .and_then(|s| s.as_str())
+                == Some("active")
+                && !sent_pause
+            {
+                steer
+                    .as_ref()
+                    .unwrap()
+                    .send(SteerMessage {
+                        prompt: "/goal pause".into(),
+                        message_id: None,
+                    })
+                    .await
+                    .unwrap();
+                sent_pause = true;
+            } else if goal
+                .as_ref()
+                .and_then(|goal| goal.get("status"))
+                .and_then(|s| s.as_str())
+                == Some("paused")
+                && !sent_clear
+            {
+                steer
+                    .as_ref()
+                    .unwrap()
+                    .send(SteerMessage {
+                        prompt: "/goal clear".into(),
+                        message_id: None,
+                    })
+                    .await
+                    .unwrap();
+                steer.take();
+                sent_clear = true;
+            }
+            assert_ne!(
+                goal.as_ref()
+                    .and_then(|goal| goal.get("threadId"))
+                    .and_then(|s| s.as_str()),
+                Some("child-goal")
+            );
+        }
+        events.push(event);
+    }
+    assert!(sent_pause && sent_clear);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::GoalUpdate { goal: None, .. }))
+    );
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Subagent { event, .. } if matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. }))));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            ..
+        }
+    )));
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Steered { .. }
+            | AgentEvent::UserMessage { .. }
+            | AgentEvent::Done {
+                status: DoneStatus::Interrupted,
+                ..
+            }
+    )));
+}
+
+#[tokio::test]
+async fn goal_command_keeps_native_auto_turn_active_until_it_finishes() {
+    let (controls, steer, _token) = controls("Yes");
+    drop(steer);
+    let events = run_to_end(
+        &harness(),
+        request("/goal --budget 5000 Verify JJzeron goals"),
+        controls,
+    )
+    .await;
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::GoalUpdate { harness: HarnessId::Codex, goal: Some(goal) }
+            if goal["objective"] == "Verify JJzeron goals"
+                && goal["status"] == "active"
+                && goal["tokenBudget"] == 5000
+    )));
+    let goal = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::GoalUpdate { goal: Some(_), .. }))
+        .unwrap();
+    let work = events
+        .iter()
+        .position(
+            |event| matches!(event, AgentEvent::TextDelta { text } if text == "Goal work started"),
+        )
+        .unwrap();
+    let done = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(goal < work && work < done);
+}
+
+#[tokio::test]
 async fn reasoning_preserves_summary_parts_and_item_boundaries_per_thread() {
     let (controls, _steer, _token) = controls("Yes");
     let events = run_to_end(&harness(), request("scenario:reasoning"), controls).await;
@@ -1158,7 +1285,7 @@ async fn skills_are_not_advertised_as_commands() {
             .iter()
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["compact", "review"]
+        vec!["compact", "review", "goal"]
     );
     let cwd = tempfile::tempdir().unwrap();
     let skills = h
@@ -1178,7 +1305,7 @@ async fn skills_are_not_advertised_as_commands() {
             .iter()
             .map(|c| c.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["compact", "review"]
+        vec!["compact", "review", "goal"]
     );
 }
 

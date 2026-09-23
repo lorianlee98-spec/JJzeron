@@ -22,7 +22,7 @@ use zeron_proto::{
 };
 
 const CHAT: &str = "rich-delivery";
-const HARNESSES: [HarnessId; 9] = [
+const HARNESSES: [HarnessId; 10] = [
     HarnessId::ClaudeCode,
     HarnessId::Codex,
     HarnessId::Cursor,
@@ -30,6 +30,7 @@ const HARNESSES: [HarnessId; 9] = [
     HarnessId::Grok,
     HarnessId::Hermes,
     HarnessId::Pi,
+    HarnessId::Prime,
     HarnessId::Antigravity,
     HarnessId::Opencode,
 ];

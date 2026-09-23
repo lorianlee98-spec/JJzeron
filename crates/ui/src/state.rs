@@ -91,7 +91,7 @@ impl Drop for WatchPreparation {
 /// Everything needed to reach (or start) an engine.
 #[derive(Debug, Clone)]
 pub struct EngineBootConfig {
-    /// Data directory for the embedded engine (`~/.zeron`).
+    /// Data directory for the embedded engine (`~/.jjzeron`).
     pub data_dir: PathBuf,
     /// Localhost IPC port to probe / serve.
     pub ipc_port: u16,
@@ -711,6 +711,8 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
+    pub active_goal: Option<(zeron_proto::HarnessId, serde_json::Value)>,
+    run_events_task: Option<Task<()>>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
@@ -806,6 +808,8 @@ impl AppState {
             no_project: false,
             selected_device: None,
             selected_chat: None,
+            active_goal: None,
+            run_events_task: None,
             transcript: Vec::new(),
             queue: Vec::new(),
             context_usage: None,
@@ -961,6 +965,8 @@ impl AppState {
             self.transcript_baselines.remove(selected);
             self.prepared_transcripts.remove(selected);
             self.selected_chat = None;
+            self.run_events_task = None;
+            self.active_goal = None;
             self.transcript.clear();
             self.context_usage = None;
             self.transcript_revision = self.transcript_revision.wrapping_add(1);
@@ -1780,6 +1786,8 @@ impl AppState {
     /// stopped. The next bootstrap must never render rows from the previous
     /// account while the local profile is opening.
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
+        self.run_events_task = None;
+        self.active_goal = None;
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
@@ -1935,6 +1943,9 @@ impl AppState {
         self.connection = ConnectionStatus::Ready;
         // Re-subscribe the transcript if a chat was already selected (reconnect path).
         if let Some(chat_id) = self.selected_chat.clone() {
+            self.active_goal = None;
+            self.run_events_task =
+                Some(spawn_run_events_watch(cx, handle.clone(), chat_id.clone()));
             self.transcript_task =
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
             if handle
@@ -2101,6 +2112,8 @@ impl AppState {
             }
         }
         self.selected_chat = chat_id.clone();
+        self.run_events_task = None;
+        self.active_goal = None;
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
@@ -2146,6 +2159,8 @@ impl AppState {
             self.mark_chat_seen(id, cx);
         }
         if let (Some(chat_id), Some(handle)) = (chat_id, self.engine.clone()) {
+            self.run_events_task =
+                Some(spawn_run_events_watch(cx, handle.clone(), chat_id.clone()));
             self.transcript_task =
                 Some(spawn_transcript_watch(cx, handle.clone(), chat_id.clone()));
             if handle
@@ -2746,6 +2761,86 @@ fn spawn_subagent_watch(
                 return;
             }
             cx.background_executor().timer(RETRY_DELAY).await;
+        }
+    })
+}
+
+fn spawn_run_events_watch(
+    cx: &mut Context<AppState>,
+    handle: EngineHandle,
+    chat_id: String,
+) -> Task<()> {
+    cx.spawn(async move |this, cx| {
+        let mut after_seq: Option<u64> = None;
+        loop {
+            let params = match after_seq {
+                Some(seq) => serde_json::json!({"chatId": chat_id, "afterSeq": seq}),
+                None => serde_json::json!({"chatId": chat_id}),
+            };
+            match handle
+                .client()
+                .subscribe_checked(methods::WATCH_RUN_EVENTS, params)
+                .await
+            {
+                Ok(mut stream) => {
+                    while let Some(frame) = stream.recv().await {
+                        let Some(seq) = frame["seq"].as_u64() else {
+                            continue;
+                        };
+                        if after_seq.is_some_and(|last| seq <= last) {
+                            continue;
+                        }
+                        after_seq = Some(seq);
+                        let event = &frame["event"];
+                        if event["type"] == "sessionStarted" {
+                            if this
+                                .update(cx, |state, cx| {
+                                    if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
+                                        state.active_goal = None;
+                                        cx.notify();
+                                    }
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                            continue;
+                        }
+                        let update = match event["type"].as_str() {
+                            Some("primeEvent") if event["event"]["type"] == "goal_update" => {
+                                Some((
+                                    zeron_proto::HarnessId::Prime,
+                                    event["event"]["goal"].clone(),
+                                ))
+                            }
+                            Some("goalUpdate") if event["harness"] == "codex" => {
+                                Some((zeron_proto::HarnessId::Codex, event["goal"].clone()))
+                            }
+                            _ => None,
+                        };
+                        let Some((harness, goal)) = update else {
+                            continue;
+                        };
+                        if this
+                            .update(cx, |state, cx| {
+                                if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
+                                    state.active_goal =
+                                        (!goal.is_null()).then_some((harness, goal));
+                                    cx.notify();
+                                }
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                Err(zeron_rpc::RpcError::UnknownMethod(_)) => return,
+                Err(error) => tracing::warn!(%chat_id, %error, "run event watch failed; retrying"),
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
         }
     })
 }

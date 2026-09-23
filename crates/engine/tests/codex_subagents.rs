@@ -44,6 +44,80 @@ fn text(entries: &[SessionMessageEntry], role: MessageRole) -> String {
         .collect()
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_steer_keeps_a_running_codex_child_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let (core, _) = assemble(dir.path());
+    let request = RunRequest {
+        prompt: "scenario:steer-child".into(),
+        harness: Some(HarnessId::Codex),
+        model: None,
+        reasoning: None,
+        model_options: Default::default(),
+        cwd: dir.path().display().to_string(),
+        sandbox: SandboxLevel::ReadOnly,
+        auto_approve: true,
+        attachments: vec![],
+        worktree: None,
+        resume: None,
+    };
+    core.sessions
+        .dispatch(CHAT, HarnessId::Codex, request, Some("initial-user".into()))
+        .await
+        .unwrap();
+    let child_doc = format!("{CHAT}--sub--spawn-alpha");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !text(&entries(&core, &child_doc), MessageRole::Assistant).contains("child working") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child running before steer");
+
+    let id = core
+        .doc_host
+        .queue_message_with_behavior(CHAT, "Redirect while child runs", vec![], true)
+        .unwrap();
+    let client = zeron_rpc::memory_client(core.rpc_service());
+    let reply = client
+        .call(
+            zeron_rpc::methods::STEER_QUEUED_MESSAGE_NOW,
+            serde_json::json!({"chatId": CHAT, "id": id}),
+        )
+        .await
+        .expect("steer queued row without interruption");
+    assert_eq!(reply["sent"], true);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let child = entries(&core, &child_doc);
+            let parent = entries(&core, CHAT);
+            if text(&child, MessageRole::Assistant) == "child working and finished"
+                && text(&parent, MessageRole::Assistant).contains("parent incorporated steer")
+                && core
+                    .sessions
+                    .session_status(CHAT)
+                    .is_some_and(|status| status.status == SessionStatus::Idle)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child and parent complete after steer");
+    let parent = entries(&core, CHAT);
+    assert!(text(&parent, MessageRole::User).contains("Redirect while child runs"));
+    assert!(parent.iter().flat_map(|entry| &entry.parts).any(|part| matches!(part,
+        MessagePart::Tool { id, subagent_status: Some(SubagentStatus::Done), .. } if id == "spawn-alpha"
+    )));
+    assert!(
+        parent
+            .iter()
+            .all(|entry| entry.status != Some(MessageStatus::Aborted))
+    );
+    core.shutdown().await;
+}
+
 async fn check_persistence(
     scenario: &str,
     alpha_status: SubagentStatus,

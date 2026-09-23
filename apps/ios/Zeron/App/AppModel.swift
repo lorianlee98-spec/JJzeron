@@ -666,7 +666,7 @@ final class AppModel {
         guard !stores.isEmpty else { return }
 
         let state = BackgroundFlushState()
-        let identifier = UIApplication.shared.beginBackgroundTask(withName: "zeron.flushDocs") {
+        let identifier = UIApplication.shared.beginBackgroundTask(withName: "jjzeron.flushDocs") {
             let identifier = state.cancel()
             if identifier != .invalid {
                 UIApplication.shared.endBackgroundTask(identifier)
@@ -786,7 +786,7 @@ final class AppModel {
                 self.kickAllRooms()
             }
         }
-        monitor.start(queue: DispatchQueue(label: "zeron.path-monitor"))
+        monitor.start(queue: DispatchQueue(label: "jjzeron.path-monitor"))
         pathMonitor = monitor
     }
 

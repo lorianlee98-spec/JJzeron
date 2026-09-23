@@ -699,6 +699,47 @@ fn open_generated_file(
 }
 
 impl Uploads {
+    /// Materialize an inline tool raster in the active profile. The caller
+    /// publishes only the returned metadata; Base64 never reaches the journal.
+    pub fn import_inline_image(
+        &self,
+        data: &str,
+        stable_key: &str,
+    ) -> Result<ImportedImage, EngineError> {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        let invalid = || EngineError::Other("Tool image is invalid".into());
+        if data.len() > 32 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        let bytes = BASE64.decode(data.as_bytes()).map_err(|_| invalid())?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_GENERATED_IMAGE_BYTES {
+            return Err(invalid());
+        }
+        let (ext, mime) = raster_signature(&bytes[..bytes.len().min(12)]).ok_or_else(invalid)?;
+        std::fs::create_dir_all(self.dir())?;
+        let uploads_root = self.dir().canonicalize()?;
+        let name = format!("tool-image.{ext}");
+        let mut digest = Sha256::new();
+        digest.update(stable_key.as_bytes());
+        digest.update(&bytes);
+        let hash = format!("{:x}", digest.finalize());
+        let destination = uploads_root.join(format!("{hash}-{name}"));
+        let mut temporary = tempfile::NamedTempFile::new_in(&uploads_root)?;
+        temporary.write_all(&bytes)?;
+        temporary.flush()?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&destination)
+            .map_err(|error| EngineError::Io(error.error))?;
+        Ok(ImportedImage {
+            path: destination.to_string_lossy().into_owned(),
+            name,
+            mime_type: mime.into(),
+            size: bytes.len() as u64,
+        })
+    }
+
     /// Copy a Codex-owned raster into the active profile without exposing the
     /// original path to the journal, document, RPC readers, or relay.
     pub fn import_generated_image(
@@ -778,6 +819,21 @@ mod generated_image_tests {
     use super::*;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\nfixture";
+
+    #[test]
+    fn tool_image_replay_reuses_bytes_without_overwriting_history() {
+        let store = tempfile::tempdir().unwrap();
+        let uploads = Uploads::from_root(store.path());
+        let first = BASE64.encode(PNG);
+        let second = BASE64.encode(b"\x89PNG\r\n\x1a\nother");
+        let initial = uploads.import_inline_image(&first, "chat\0call:image").unwrap();
+        let replay = uploads.import_inline_image(&first, "chat\0call:image").unwrap();
+        let later = uploads.import_inline_image(&second, "chat\0call:image").unwrap();
+        assert_eq!(initial, replay);
+        assert_ne!(initial.path, later.path);
+        assert_eq!(std::fs::read(&initial.path).unwrap(), PNG);
+        assert_eq!(std::fs::read(&later.path).unwrap(), BASE64.decode(second).unwrap());
+    }
 
     #[test]
     fn generated_image_formats_are_sniffed_and_replays_are_idempotent() {

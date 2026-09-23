@@ -1,15 +1,14 @@
 //! zeron-update — release checking and self-update, shared by the engine (the
-//! background checker + `ApplyUpdate`), the CLI (`zeron update`), and the UI
+//! background checker + `ApplyUpdate`), the CLI (`jjzeron update`), and the UI
 //! (the sidebar update strip + macOS bundle swap).
 //!
-//! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
-//! artifacts live in the `comet-native-releases` R2 bucket, served pre-auth at
-//! `{edge}/releases/*`. `manifest.json` carries the latest version plus a
+//! Release layout: an explicitly configured JJzeron feed serves artifacts.
+//! `manifest.json` carries the latest version plus a
 //! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
 //! releases published before the manifest existed.
 //!
 //! Install kinds and their update paths:
-//! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
+//! - **Managed** (`~/.jjzeron/app/<ver>` + `current` symlink — the curl|sh
 //!   installer): download the headless tarball into a new versioned dir, flip
 //!   the symlink, restart the service. Same flow the installer script performs,
 //!   natively.
@@ -101,16 +100,16 @@ fn require_mac_app_update_platform() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `zeron-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
+/// `jjzeron-<ver>-<os>-<arch>.tar.gz` — the headless/CLI tarball (Linux CI builds).
 pub fn headless_artifact(version: &str) -> String {
     let (os, arch) = platform_key();
-    format!("zeron-{version}-{os}-{arch}.tar.gz")
+    format!("jjzeron-{version}-{os}-{arch}.tar.gz")
 }
 
-/// `zeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
+/// `jjzeron-<ver>-macos-<arch>-app.tar.gz` — the macOS app update payload.
 pub fn mac_app_artifact(version: &str) -> String {
     let (_, arch) = platform_key();
-    format!("zeron-{version}-macos-{arch}-app.tar.gz")
+    format!("jjzeron-{version}-macos-{arch}-app.tar.gz")
 }
 
 /// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
@@ -189,7 +188,7 @@ fn http_client_with_timeouts(
         // Inactivity timeout, not a total download cap: slow progressing
         // updates remain viable on constrained links.
         .read_timeout(read)
-        .user_agent(concat!("zeron/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("jjzeron/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 return attempt.error("too many update redirects");
@@ -221,17 +220,33 @@ fn validate_release_override(value: &str) -> anyhow::Result<String> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
-fn release_base(edge_url: &str) -> anyhow::Result<String> {
-    if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
-        && !url.trim().is_empty()
-    {
-        return validate_release_override(&url);
-    }
+fn release_base(_edge_url: &str) -> anyhow::Result<String> {
+    let override_url = std::env::var("ZERON_RELEASES_URL").ok();
     #[cfg(windows)]
-    if let Some(url) = windows::release_url()? {
-        return Ok(url.trim_end_matches('/').to_owned());
+    let portable_url = if override_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty())
+    {
+        None
+    } else {
+        windows::release_url()?
+    };
+    #[cfg(not(windows))]
+    let portable_url: Option<String> = None;
+    configured_release_base(override_url.as_deref(), portable_url.as_deref())
+}
+
+fn configured_release_base(
+    override_url: Option<&str>,
+    portable_url: Option<&str>,
+) -> anyhow::Result<String> {
+    if let Some(url) = override_url.filter(|url| !url.trim().is_empty()) {
+        return validate_release_override(url);
     }
-    Ok(format!("{}/releases", edge_url.trim_end_matches('/')))
+    if let Some(url) = portable_url {
+        return validate_release_override(url);
+    }
+    bail!("JJzeron update feed is not configured (set ZERON_RELEASES_URL)")
 }
 
 // ---------------------------------------------------------------------------
@@ -241,8 +256,8 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
 /// How this binary was installed — decides the update path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallKind {
-    /// `~/.zeron/app/<ver>/zeron` behind the `current` symlink
-    /// (curl|sh installer / a previous `zeron update`).
+    /// `~/.jjzeron/app/<ver>/jjzeron` behind the `current` symlink
+    /// (curl|sh installer / a previous `jjzeron update`).
     Managed { app_root: PathBuf },
     /// Running out of a macOS `.app` bundle.
     MacApp { bundle: PathBuf },
@@ -313,20 +328,22 @@ fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> Inst
             directory: exe.parent().unwrap().to_owned(),
         };
     }
-    // Never interpret a coincidental Windows `%HOME%\.zeron\app` layout as
+    // Never interpret a coincidental Windows `%HOME%\.jjzeron\app` layout as
     // the Unix symlink-managed installation.
     if !managed_updates_supported(os) {
         return InstallKind::Unmanaged;
     }
     if let Some(home) = home {
         // `current_exe` resolves the `current` symlink to the versioned dir.
-        let app_root = home.join(".zeron").join("app");
+        let app_root = home.join(".jjzeron").join("app");
         if exe.starts_with(&app_root) {
             return InstallKind::Managed { app_root };
         }
     }
     for ancestor in exe.ancestors() {
-        if ancestor.extension().is_some_and(|ext| ext == "app")
+        if ancestor
+            .file_name()
+            .is_some_and(|name| name == "JJzeron.app")
             && exe.starts_with(ancestor.join("Contents").join("MacOS"))
         {
             return InstallKind::MacApp {
@@ -422,7 +439,7 @@ pub async fn stage_headless(
     require_managed_update_platform()?;
     let version = &manifest.version;
     let dest = app_root.join(version);
-    if dest.join("zeron").exists() {
+    if dest.join("jjzeron").exists() {
         return Ok(dest);
     }
     let file = headless_artifact(version);
@@ -446,13 +463,13 @@ pub async fn stage_headless(
                 "--strip-components=1",
             ],
         )?;
-        if !unpacked.join("zeron").is_file() {
-            bail!("tarball {file} did not contain a zeron binary");
+        if !unpacked.join("jjzeron").is_file() {
+            bail!("tarball {file} did not contain a jjzeron binary");
         }
         match std::fs::rename(&unpacked, &dest) {
             Ok(()) => {}
             // Lost a race with another stager — the staged copy is equivalent.
-            Err(_) if dest.join("zeron").exists() => {}
+            Err(_) if dest.join("jjzeron").exists() => {}
             Err(err) => {
                 return Err(err).with_context(|| format!("moving {} into place", dest.display()));
             }
@@ -470,7 +487,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let target = app_root.join(version);
-        if !target.join("zeron").exists() {
+        if !target.join("jjzeron").exists() {
             bail!("{} is not a staged install", target.display());
         }
         let tmp = app_root.join(format!(".current-{}", std::process::id()));
@@ -487,7 +504,7 @@ pub fn apply_headless(app_root: &Path, version: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Restart the installed engine service (the same units `zeron daemon` and the
+/// Restart the installed engine service (the same units `jjzeron daemon` and the
 /// curl|sh installer manage). Called after a symlink swap so the running daemon
 /// picks up the new binary.
 pub fn restart_service() -> anyhow::Result<()> {
@@ -497,10 +514,10 @@ pub fn restart_service() -> anyhow::Result<()> {
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         run(
             "launchctl",
-            &["kickstart", "-k", &format!("gui/{uid}/sh.zeron.app")],
+            &["kickstart", "-k", &format!("gui/{uid}/sh.jjzeron.app")],
         )
     } else {
-        run("systemctl", &["--user", "restart", "zeron.service"])
+        run("systemctl", &["--user", "restart", "jjzeron.service"])
     }
 }
 
@@ -508,7 +525,7 @@ pub fn restart_service() -> anyhow::Result<()> {
 // macOS app-bundle installs — the desktop path
 // ---------------------------------------------------------------------------
 
-/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/Zeron.app`
+/// Download + unpack the app tarball into `{data_dir}/updates/<ver>/JJzeron.app`
 /// (idempotent). Returns the staged bundle path.
 pub async fn stage_mac_app(
     edge_url: &str,
@@ -519,8 +536,8 @@ pub async fn stage_mac_app(
     require_mac_app_update_platform()?;
     let version = &manifest.version;
     let dir = data_dir.join("updates").join(version);
-    let staged = dir.join("Zeron.app");
-    if staged.join("Contents/MacOS/zeron").exists() {
+    let staged = dir.join("JJzeron.app");
+    if staged.join("Contents/MacOS/jjzeron").exists() {
         return Ok(staged);
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -538,8 +555,8 @@ pub async fn stage_mac_app(
         ],
     )?;
     std::fs::remove_file(&tarball).ok();
-    if !staged.join("Contents/MacOS/zeron").exists() {
-        bail!("app tarball {file} did not contain Zeron.app");
+    if !staged.join("Contents/MacOS/jjzeron").exists() {
+        bail!("app tarball {file} did not contain JJzeron.app");
     }
     Ok(staged)
 }
@@ -956,6 +973,29 @@ mod tests {
     }
 
     #[test]
+    fn update_feed_requires_explicit_configuration() {
+        assert!(
+            configured_release_base(None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("JJzeron update feed is not configured")
+        );
+        assert_eq!(
+            configured_release_base(Some("https://fork.example/releases"), None).unwrap(),
+            "https://fork.example/releases"
+        );
+        assert_eq!(
+            configured_release_base(None, Some("https://portable.example/releases")).unwrap(),
+            "https://portable.example/releases"
+        );
+        assert_eq!(
+            configured_release_base(Some("https://fork.example/releases"), Some("not-a-url"))
+                .unwrap(),
+            "https://fork.example/releases"
+        );
+    }
+
+    #[test]
     fn version_compare() {
         assert!(version_newer("0.1.1", "0.1.0"));
         assert!(version_newer("0.2.0", "0.1.9"));
@@ -973,34 +1013,50 @@ mod tests {
     fn install_kind_detection() {
         assert_eq!(
             detect_install_from_for_os(
-                Path::new("/home/u/.zeron/app/0.1.1/zeron"),
+                Path::new("/home/u/.jjzeron/app/0.1.1/jjzeron"),
                 Some(Path::new("/home/u")),
                 "linux",
             ),
             InstallKind::Managed {
-                app_root: PathBuf::from("/home/u/.zeron/app")
+                app_root: PathBuf::from("/home/u/.jjzeron/app")
             }
         );
         assert_eq!(
             detect_install_from_for_os(
-                Path::new("/Applications/Zeron.app/Contents/MacOS/zeron"),
+                Path::new("/Applications/JJzeron.app/Contents/MacOS/jjzeron"),
                 Some(Path::new("/Users/u")),
                 "macos",
             ),
             InstallKind::MacApp {
-                bundle: PathBuf::from("/Applications/Zeron.app")
+                bundle: PathBuf::from("/Applications/JJzeron.app")
             }
         );
         // A path merely containing `.app` without the bundle layout is not a bundle.
         assert_eq!(
-            detect_install_from_for_os(Path::new("/tmp/foo.app/zeron"), None, "macos"),
+            detect_install_from_for_os(Path::new("/tmp/foo.app/jjzeron"), None, "macos"),
             InstallKind::Unmanaged
         );
         assert_eq!(
             detect_install_from_for_os(
-                Path::new("/src/target/release/zeron"),
+                Path::new("/src/target/release/jjzeron"),
                 Some(Path::new("/home/u")),
                 "linux",
+            ),
+            InstallKind::Unmanaged
+        );
+        assert_eq!(
+            detect_install_from_for_os(
+                Path::new("/home/u/.zeron/app/0.1.1/zeron"),
+                Some(Path::new("/home/u")),
+                "linux",
+            ),
+            InstallKind::Unmanaged
+        );
+        assert_eq!(
+            detect_install_from_for_os(
+                Path::new("/Applications/Zeron.app/Contents/MacOS/zeron"),
+                None,
+                "macos",
             ),
             InstallKind::Unmanaged
         );
@@ -1009,10 +1065,10 @@ mod tests {
     #[test]
     fn artifact_names_match_packaging() {
         let (os, arch) = platform_key();
-        assert!(headless_artifact("0.2.0").starts_with("zeron-0.2.0-"));
+        assert!(headless_artifact("0.2.0").starts_with("jjzeron-0.2.0-"));
         assert_eq!(
             headless_artifact("0.2.0"),
-            format!("zeron-0.2.0-{os}-{arch}.tar.gz")
+            format!("jjzeron-0.2.0-{os}-{arch}.tar.gz")
         );
         assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
     }
@@ -1028,7 +1084,7 @@ mod tests {
     fn windows_install_is_always_unmanaged() {
         assert_eq!(
             detect_install_from(
-                Path::new(r"C:\Users\u\.zeron\app\0.2.0\zeron.exe"),
+                Path::new(r"C:\Users\u\.jjzeron\app\0.2.0\jjzeron.exe"),
                 Some(Path::new(r"C:\Users\u")),
             ),
             InstallKind::Unmanaged
@@ -1065,10 +1121,13 @@ mod tests {
                 .contains("not supported on windows")
         );
         assert!(
-            apply_mac_app(&data_dir.join("Zeron.app"), &data_dir.join("Installed.app"))
-                .unwrap_err()
-                .to_string()
-                .contains("not supported on windows")
+            apply_mac_app(
+                &data_dir.join("JJzeron.app"),
+                &data_dir.join("Installed.app")
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("not supported on windows")
         );
         assert!(
             restart_service()
@@ -1081,12 +1140,12 @@ mod tests {
     #[test]
     fn manifest_parses_with_and_without_files() {
         let full: Manifest = serde_json::from_str(
-            r#"{"version":"0.1.1","files":{"zeron-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
+            r#"{"version":"0.1.1","files":{"jjzeron-0.1.1-linux-x86_64.tar.gz":{"sha256":"abc"}}}"#,
         )
         .unwrap();
         assert_eq!(full.version, "0.1.1");
         assert_eq!(
-            full.files["zeron-0.1.1-linux-x86_64.tar.gz"]
+            full.files["jjzeron-0.1.1-linux-x86_64.tar.gz"]
                 .sha256
                 .as_deref(),
             Some("abc")
@@ -1102,7 +1161,7 @@ mod tests {
         let app_root = tmp.path().join("app");
         for ver in ["0.1.0", "0.1.1"] {
             std::fs::create_dir_all(app_root.join(ver)).unwrap();
-            std::fs::write(app_root.join(ver).join("zeron"), ver).unwrap();
+            std::fs::write(app_root.join(ver).join("jjzeron"), ver).unwrap();
         }
         apply_headless(&app_root, "0.1.0").unwrap();
         assert_eq!(

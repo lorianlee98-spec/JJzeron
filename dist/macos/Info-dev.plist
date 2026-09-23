@@ -5,17 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Zeron Dev</string>
+    <string>JJzeron Dev</string>
     <key>CFBundleExecutable</key>
-    <string>zeron</string>
+    <string>jjzeron</string>
     <key>CFBundleIconFile</key>
     <string>zeron.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>sh.zeron.app.dev</string>
+    <string>sh.jjzeron.app.dev</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Zeron Dev</string>
+    <string>JJzeron Dev</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

@@ -664,8 +664,7 @@ async fn queued_text_waits_for_a_steerable_turn_even_with_legacy_policy() {
     core.shutdown().await;
 }
 
-/// The legacy explicit-steer RPC remains compatible with older clients;
-/// current clients offer only Send now.
+/// Codex and Prime queue rows can use the non-interrupting steer RPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn held_policy_keeps_a_steerable_message_visible_until_steer_now() {
     let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;

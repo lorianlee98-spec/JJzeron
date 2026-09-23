@@ -104,7 +104,7 @@ pub(crate) fn new_id() -> String {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// Data directory (default `~/.zeron`, dev `~/.zeron-dev`).
+    /// Data directory (default `~/.jjzeron`, dev bundle path is separate).
     pub data_dir: PathBuf,
     /// Edge base URL.
     pub edge_url: String,

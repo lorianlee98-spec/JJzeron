@@ -151,13 +151,13 @@ async fn repos_round_trip_add_branches_worktrees() {
     assert_eq!(branches[0], "main", "default branch first: {branches:?}");
     assert!(branches.contains(&"feature/x".to_string()));
 
-    // Worktree add: zeron/<name> branch, isolated dir under the test root.
+    // Worktree add: jjzeron/<name> branch, isolated dir under the test root.
     let worktree = repos
         .create_worktree(&repo_dir, "main")
         .await
         .expect("worktree");
     assert!(
-        worktree.branch.starts_with("zeron/"),
+        worktree.branch.starts_with("jjzeron/"),
         "branch: {}",
         worktree.branch
     );
@@ -1842,7 +1842,7 @@ async fn rpc_dispatch_for_m5_methods() {
         worktree["branch"]
             .as_str()
             .expect("branch")
-            .starts_with("zeron/")
+            .starts_with("jjzeron/")
     );
     assert!(worktree["checkoutId"].is_string());
     assert!(worktree.get("setupAction").is_none());

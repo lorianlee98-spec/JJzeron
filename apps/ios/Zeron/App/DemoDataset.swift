@@ -51,7 +51,7 @@ final class DemoDataset {
 
         let chats = [
             Chat(id: "chat-veil", deviceId: "dev-mac", title: "Streaming veil on transcript rows",
-                 archived: false, cwd: "/Users/dev/.zeron/worktrees/zeron-veil-fade",
+                 archived: false, cwd: "/Users/dev/.jjzeron/worktrees/jjzeron-veil-fade",
                  branch: "veil-fade", checkoutId: nil,
                  config: claude, lastMessagePreview: "Porting the paint-only fade…",
                  lastMessageAt: now - 40_000, createdAt: now - 3_600_000,
@@ -145,7 +145,7 @@ final class DemoDataset {
             seeded = [
                 RepoRef(name: "main", current: true, worktreePath: nil),
                 RepoRef(name: "veil-fade", current: false,
-                        worktreePath: "/Users/dev/.zeron/worktrees/zeron-veil-fade"),
+                        worktreePath: "/Users/dev/.jjzeron/worktrees/jjzeron-veil-fade"),
                 RepoRef(name: "feature/diff-pane", current: false, worktreePath: nil),
                 RepoRef(name: "fix/tool-colors", current: false, worktreePath: nil),
             ]
@@ -170,7 +170,7 @@ final class DemoDataset {
 
     func createWorktree(spacePath: String, base: String) -> String {
         let slug = base.replacingOccurrences(of: "/", with: "-")
-        let path = "/Users/dev/.zeron/worktrees/\((spacePath as NSString).lastPathComponent)-\(slug)"
+        let path = "/Users/dev/.jjzeron/worktrees/\((spacePath as NSString).lastPathComponent)-\(slug)"
         var refs = listRefs(spacePath: spacePath)
         if let ix = refs.firstIndex(where: { $0.name == base }), refs[ix].worktreePath == nil {
             refs[ix].worktreePath = path

@@ -1,6 +1,6 @@
-# Zeron
+# JJzeron
 
-Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) locally by default, with optional multi-device sync.
+JJzeron is a local fork of [Zeron](https://github.com/zeronsh/zeron) with native Prime Agent RPC support. Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Prime Agent, Antigravity) locally by default, with optional multi-device sync.
 
 *English | [简体中文](README.zh-CN.md)*
 
@@ -8,33 +8,36 @@ Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi,
 
 Every device runs a small engine that stores sessions on that device. A new installation starts in local-only mode without an account or a network connection.
 
-## Install and run locally (Linux)
+## Build and run locally
 
 ```bash
-curl -fsSL https://zeron.sh/install.sh | sh
-zeron status
+cargo build --release -p zeron
+./target/release/jjzeron status
 ```
 
-The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required.
+JJzeron uses `~/.jjzeron` on Unix, a separate Windows application directory, a separate daemon service, and the `jjzeron://` URL scheme. Build with the pinned Rust 1.95.0 toolchain. The upstream Zeron installer installs the original app, not this fork.
+
+Prime Agent uses your local `prime-agent` CLI and its existing config, extensions, skills, and AGENTS.md. JJzeron forwards every Prime JSONL RPC notification through `WatchRunEvents {chatId, afterSeq?}` as `{seq, event}`; the exact Prime payload is under `event.event`. Native notifications and their normalized chat events are replayable from the local run journal.
 
 The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
 
 Day-to-day:
 
 ```bash
-zeron status      # local/synced mode and engine status
-zeron update      # update to the latest release
-zeron daemon start|stop|restart|status
+jjzeron status      # local/synced mode and engine status
+jjzeron daemon start|stop|restart|status
 ```
+
+Updates require an explicit fork release feed via `ZERON_RELEASES_URL`. JJzeron never uses upstream Zeron's releases by default.
 
 ## Optional multi-device sync
 
 Sign in only when you want to open your account's synced workspace. Authentication changes the profile selected by the next engine start, so stop the daemon before changing it:
 
 ```bash
-zeron daemon stop
-zeron login
-zeron daemon start
+jjzeron daemon stop
+jjzeron login
+jjzeron daemon start
 ```
 
 You can then start an agent on one synced device and follow or drive it from another. An always-on machine such as a VPS can keep those agents working after you close your laptop.
@@ -44,22 +47,22 @@ Devices signed in to the same synced account are trusted with remote workspace a
 Signing in does not upload, move, or import existing local sessions. Local sessions and their attachments remain under the local profile and reappear when you return to local-only mode:
 
 ```bash
-zeron daemon stop
-zeron logout
-zeron daemon start
+jjzeron daemon stop
+jjzeron logout
+jjzeron daemon start
 ```
 
-`zeron login` and `zeron logout` refuse to modify credentials while an engine owns the data directory. The desktop app follows the same next-restart profile boundary.
+`jjzeron login` and `jjzeron logout` refuse to modify credentials while an engine owns the data directory. The desktop app follows the same next-restart profile boundary.
 
-On macOS: use the desktop release, or build `zeron` from source and run `zeron daemon install` to install the launchd service.
+On macOS: build from source and run `jjzeron daemon install` to install the launchd service.
 
-On Windows: extract the portable release ZIP and run `zeron.exe`. Keep `zeron-update.json` beside it for in-app updates. See the [development notes](docs/reference/windows-development.md) for source builds.
+On Windows: run `jjzeron.exe` from a fork release ZIP. Keep `jjzeron-update.json` beside it for in-app updates. See the [development notes](docs/reference/windows-development.md) for source builds.
 
 ## Sponsors
 
-Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring Zeron.
+Thank you to [The Context Company](https://www.thecontextcompany.com/) for sponsoring the upstream Zeron project.
 
-You can help fund Zeron's development too. Individuals and companies are welcome to [become a sponsor on GitHub](https://github.com/sponsors/zeronsh).
+You can help fund upstream Zeron's development too. Individuals and companies are welcome to [become a sponsor on GitHub](https://github.com/sponsors/zeronsh).
 
 ---
 

@@ -4220,7 +4220,7 @@ impl DocHost {
                     ws.claim_chat(chat_id, Some(&request.cwd))?;
                     // A pre-existing row (the client's createChat raced ahead)
                     // still carries the repo folder — repoint it at the fresh
-                    // worktree, and stamp the actual `zeron/<name>` branch so
+                    // worktree, and stamp the actual `jjzeron/<name>` branch so
                     // the footer and the title-rename flow see it.
                     if let Some(wt) = &fresh_worktree {
                         if let Err(err) = ws.set_chat_cwd(chat_id, &wt.path) {
